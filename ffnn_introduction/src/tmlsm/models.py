@@ -1,6 +1,6 @@
 """Model implementations."""
 
-from typing import Callable
+from typing import Callable, Sequence, Union
 
 import equinox as eqx
 import jax
@@ -10,30 +10,92 @@ import klax
 
 
 class Model(eqx.Module):
-    """A custom trainable `equinox.Module`."""
+    """A custom trainable equinox.Module."""
 
     layers: tuple[Callable, ...]
     activations: tuple[Callable, ...]
 
-    def __init__(self, *, key: PRNGKeyArray):
-        self.layers = (
-            klax.nn.Linear("scalar", 16, weight_init=he_normal(), key=key),
-            klax.nn.Linear(16, 16, weight_init=he_normal(), key=key),
-            klax.nn.Linear(16, "scalar", weight_init=he_normal(), key=key),
-        )
+    def __init__(
+        self,
+        layer_sizes: Sequence[int],
+        activations: Sequence[Callable],
+        *,
+        key: PRNGKeyArray
+    ):
+        """
+        Initializes a feed-forward neural network.
+        """
+        keys = jax.random.split(key, len(layer_sizes) - 1)
 
-        self.activations = (
-            jax.nn.softplus,
-            jax.nn.softplus,
-            lambda x: x,
+        self.layers = tuple(
+            klax.nn.Linear(
+                in_size,
+                out_size,
+                weight_init=he_normal(),
+                key=k
+            ) for in_size, out_size, k in zip(
+                layer_sizes[:-1], layer_sizes[1:], keys
+            )
         )
+        self.activations = tuple(activations)
 
     def __call__(self, x):
+        """Performs the forward pass of the network."""
         for layer, activation in zip(self.layers, self.activations):
             x = activation(layer(x))
         return x
 
 
-def build(*, key: PRNGKeyArray):
-    """Build and return a model instance."""
-    return Model(key=key)
+def build(
+    *,
+    key: PRNGKeyArray,
+    input_dim: int,
+    output_dim: int,
+    num_hidden_layers: int,
+    nodes_per_layer: int,
+    activations: Union[Callable, Sequence[Callable]],
+):
+    """
+    Builds and returns a model instance with flexible activation functions.
+
+    Args:
+        key: The JAX random key for weight initialization.
+        input_dim: The dimension of the input vector.
+        output_dim: The dimension of the output vector.
+        num_hidden_layers: The number of hidden layers in the network.
+        nodes_per_layer: The number of nodes (neurons) in each hidden layer.
+        activations: Can be either a single activation function (which will be
+                     applied to all hidden layers, with a linear output layer)
+                     or a sequence (list/tuple) of activation functions. If a
+                     sequence is provided, its length must be exactly
+                     `num_hidden_layers + 1` (one for each hidden layer plus
+                     one for the output layer).
+    Returns:
+        An instance of the Model class.
+    """
+    layer_sizes = (
+        [input_dim]
+        + [nodes_per_layer] * num_hidden_layers
+        + [output_dim]
+    )
+
+    # Check if a list of activations was provided or just one
+    if isinstance(activations, (list, tuple)):
+        # If it's a list, check if the length is correct
+        expected_len = num_hidden_layers + 1
+        if len(activations) != expected_len:
+            raise ValueError(
+                f"Received a list of {len(activations)} activation functions, "
+                f"but expected {expected_len} for {num_hidden_layers} "
+                "hidden layers plus an output layer."
+            )
+        final_activations = activations
+    else:
+        # If it's a single function, create the list with a linear output
+        final_activations = [activations] * num_hidden_layers + [lambda x: x]
+
+    return Model(
+        layer_sizes=layer_sizes,
+        activations=final_activations,
+        key=key
+    )
