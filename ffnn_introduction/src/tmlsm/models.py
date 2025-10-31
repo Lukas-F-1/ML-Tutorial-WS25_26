@@ -7,6 +7,8 @@ import jax
 from jax.nn.initializers import he_normal
 from jaxtyping import PRNGKeyArray
 import klax
+import optax
+from . import losses as tl
 
 
 class Model(eqx.Module):
@@ -99,3 +101,18 @@ def build(
         activations=final_activations,
         key=key
     )
+
+# --- The Reusable Training Function (Unchanged) ---
+def train_model(model, train_data, key, steps, batch_size, learning_rate):
+    """Trains a single model instance and returns it with its history."""
+    trained_model, history = klax.fit(
+        model,
+        train_data,
+        batch_size=batch_size,
+        steps=steps,
+        loss_fn=tl.MSE(),
+        optimizer=optax.adam(learning_rate),
+        history=klax.HistoryCallback(log_every=1, verbose=False), # Log less frequently for cleaner output
+        key=key,
+    )
+    return trained_model, history
