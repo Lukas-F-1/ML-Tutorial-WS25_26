@@ -118,9 +118,32 @@ def plot_ensemble_histories(histories, title):
 
 
 
+# --- Helper function for 2D data ---
+
+def generate_2d_grid():
+    """
+    Generates a 2D grid of (x, y) points.
+    
+    Generates 20 equidistant points from -4 to 4 for both x and y,
+    and returns the meshgrid, the flattened (x, y) pairs for the NN,
+    and the x and y linspaces.
+    """
+    # 1. Create the 20 equidistant points
+    x_lin = jnp.linspace(-4, 4, 20)
+    y_lin = jnp.linspace(-4, 4, 20)
+    
+    # 2. Create the (20, 20) meshgrid for 3D plotting
+    xx, yy = jnp.meshgrid(x_lin, y_lin)
+    
+    # 3. Create the (400, 2) input data for the NN
+    # We flatten the grids and stack them
+    x_data = jnp.stack([xx.flatten(), yy.flatten()], axis=1)
+    
+    return x_data, xx, yy, x_lin, y_lin
+
+
 # ----- Data generation function for f1 ----- #
 """Tasks: 2.1, 2.2"""
-
 
 def f1():
     """Generates data for f1(x) = x^2 - y^2"""
