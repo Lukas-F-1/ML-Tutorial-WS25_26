@@ -1,3 +1,4 @@
+import jax as jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -189,3 +190,50 @@ def compute_analytical_W(I):
     W = term_iso + term_vol + term_aniso + const
     
     return W
+
+def compute_W_single(F, G_ti):
+    """
+    Computes the strain energy W for a single deformation gradient F.
+    
+    Parameters
+    ----------
+    F : array, shape (3, 3)
+        Single deformation gradient
+    G_ti : array, shape (3, 3)
+        Transversely isotropic structural tensor
+        
+    Returns
+    -------
+    W : scalar
+        Strain energy density
+    """
+    # Compute invariants for single F (reuse existing functions!)
+    invariants = compute_all_invariants(F[None, :, :], G_ti)  # Add batch dim
+    
+    # Use existing analytical W function
+    W = compute_analytical_W(invariants)
+    return W[0]  # Remove batch dim
+
+def compute_P_batch(F_batch, G_ti):
+    """
+    Computes P = ∂W/∂F for a batch of deformation gradients.
+    
+    Parameters
+    ----------
+    F_batch : array, shape (N, 3, 3)
+        Batch of deformation gradients
+    G_ti : array, shape (3, 3)
+        Transversely isotropic structural tensor
+        
+    Returns
+    -------
+    P_batch : array, shape (N, 3, 3)
+        Batch of first Piola-Kirchhoff stresses
+    """
+    # Create gradient function
+    grad_W = jax.grad(compute_W_single, argnums=0)
+    
+    # Vectorize over batch dimension
+    compute_P_vectorized = jax.vmap(grad_W, in_axes=(0, None))
+    
+    return compute_P_vectorized(F_batch, G_ti)
