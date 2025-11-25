@@ -67,7 +67,7 @@ def compute_I1(F):
   I1 : array, shape (...)
       First invariant
   """
-  C = F.transpose(-1, -2) @ F  # C = F^T F
+  C = jnp.swapaxes(F, -2, -1) @ F  # C = F^T F
   return jnp.trace(C, axis1=-2, axis2=-1)
 
 def compute_J(F):
@@ -102,7 +102,7 @@ def compute_I4(F, G_ti):
   I4 : array, shape (...)
       Fourth invariant
   """
-  C = F.transpose(-1, -2) @ F  # C = F^T F
+  C = jnp.swapaxes(F, -2, -1) @ F  # C = F^T F
   CG = C @ G_ti
   return jnp.trace(CG, axis1=-2, axis2=-1)
 
@@ -122,7 +122,7 @@ def compute_I5(F, G_ti):
     I5 : array, shape (...)
         Fifth invariant
     """
-    C = F.transpose(-1, -2) @ F  # C = F^T F
+    C = jnp.swapaxes(F, -2, -1) @ F  # C = F^T F
     
     # I3 = det(C) = det(F^T F) = det(F)^2 = J^2
     I3 = jnp.linalg.det(C)
