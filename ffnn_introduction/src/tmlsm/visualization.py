@@ -2,6 +2,8 @@
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import jax.numpy as jnp
+import jax
 
 def visualize_deformation_3d(F, step_index=0):
     """
@@ -160,3 +162,149 @@ def plot_F_diagonals(F, time=None, components=["F11", "F22", "F33"], title="Diag
     plt.show()
 
     return fig, ax
+
+def plot_model_and_history(model, X_cal, Y_cal, history, *,
+                           title_model="Model Prediction",
+                           title_history="Training History"):
+    """
+    Plots:
+    1. Model predictions vs ground truth (for calibration data)
+    2. Training loss over iterations
+
+    Parameters
+    ----------
+    model : trained model (from tm.train_model)
+    X_cal : input data used for training  (shape: (N, input_dim))
+    Y_cal : ground truth output          (shape: (N, output_dim))
+    history : klax training history object
+    """
+
+    # -----------------------
+    # Compute model predictions
+    # -----------------------
+    Y_pred = jax.vmap(model)(X_cal)
+
+    # -----------------------
+    # FIGURE 1: Model predictions
+    # -----------------------
+    plt.figure(figsize=(10, 4))
+    plt.plot(Y_cal[:, 0],    label="Ground Truth", linewidth=2)
+    plt.plot(Y_pred[:, 0],  label="Prediction", linestyle="--")
+    plt.title(title_model)
+    plt.xlabel("Sample Index")
+    plt.ylabel("Output Component 0")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # NOTE:
+    # Plotting component 0 is just an example.
+    # You can loop over components if needed.
+
+    # -----------------------
+    # FIGURE 2: Training loss
+    # -----------------------
+    plt.figure(figsize=(10, 4))
+    plt.plot(history.loss, linewidth=2)
+    plt.yscale("log")
+    plt.title(title_history)
+    plt.xlabel("Training Step")
+    plt.ylabel("Loss (log scale)")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+import matplotlib.pyplot as plt
+import jax.numpy as jnp
+import jax
+
+
+def evaluate_MS_predictions(Y_true, Y_pred, title_prefix="MS Test Evaluation"):
+    """
+    Visualizes:
+    1. Pred vs True for all 9 components
+    2. Component-wise error plots
+    3. Frobenius error measure
+    4. True vs Pred scatter plot grid
+    """
+
+    N = Y_true.shape[0]
+
+    # --------------------------------------------
+    # 1. Prediction vs True (9 components)
+    # --------------------------------------------
+    fig, axes = plt.subplots(3, 3, figsize=(12, 10))
+    axes = axes.flatten()
+
+    for i in range(9):
+        ax = axes[i]
+        ax.plot(Y_true[:, i], label="True", linewidth=2)
+        ax.plot(Y_pred[:, i], label="Pred", linestyle='--')
+        ax.set_title(f"P component {i}")
+        ax.grid(True)
+        if i == 0:
+            ax.legend()
+
+    plt.suptitle(f"{title_prefix}: Prediction vs True")
+    plt.tight_layout()
+    plt.show()
+
+    # --------------------------------------------
+    # 2. Component-wise error plots
+    # --------------------------------------------
+    errors = Y_pred - Y_true
+
+    plt.figure(figsize=(12, 4))
+    for i in range(9):
+        plt.plot(errors[:, i], label=f"Comp {i}")
+    plt.title(f"{title_prefix}: Component Errors")
+    plt.xlabel("Sample Index")
+    plt.ylabel("Error")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # --------------------------------------------
+    # 3. Frobenius norm error
+    # --------------------------------------------
+    E_frob = jnp.sqrt(jnp.sum(errors**2, axis=1))
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(E_frob, linewidth=2)
+    plt.title(f"{title_prefix}: Frobenius Norm Error")
+    plt.xlabel("Sample Index")
+    plt.ylabel("||Error||_F")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # --------------------------------------------
+    # 4. Scatter: Pred vs True (all components)
+    # --------------------------------------------
+    fig, axes = plt.subplots(3, 3, figsize=(10, 10))
+    axes = axes.flatten()
+
+    for i in range(9):
+        ax = axes[i]
+        ax.scatter(Y_true[:, i], Y_pred[:, i], s=4)
+        ax.plot([Y_true[:, i].min(), Y_true[:, i].max()],
+                [Y_true[:, i].min(), Y_true[:, i].max()],
+                'r--')
+        ax.set_title(f"Scatter P[{i}]")
+        ax.set_xlabel("True")
+        ax.set_ylabel("Pred")
+        ax.grid(True)
+
+    plt.suptitle(f"{title_prefix}: Scatter True vs Pred")
+    plt.tight_layout()
+    plt.show()
+
+    # return error metrics if needed
+    return {
+        "mae": jnp.mean(jnp.abs(errors)),
+        "rmse": jnp.sqrt(jnp.mean(errors**2)),
+        "max_error": jnp.max(jnp.abs(errors)),
+        "frob_mean": jnp.mean(E_frob),
+    }
