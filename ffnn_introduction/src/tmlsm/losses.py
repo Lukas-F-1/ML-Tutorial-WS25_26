@@ -53,3 +53,17 @@ class SobolevLoss(klax.Loss):
         loss_grad = jnp.mean(jnp.sum((y_grad_pred - y_grad_true)**2, axis=-1))
         
         return self.alpha * loss_f2 + self.beta * loss_grad
+    
+    
+class WeightedMSE(klax.Loss):
+    def __init__(self, weights):
+        self.weights = weights
+
+    def __call__(self, model, batch, batch_axis):
+        x, (y, w) = batch
+        
+        y_pred = jax.vmap(model)(x)
+        w = w.squeeze()
+
+        per_sample_loss = jnp.sum((y_pred - y)**2, axis=-1)
+        return jnp.mean(w * per_sample_loss)

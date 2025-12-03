@@ -149,6 +149,7 @@ def train_model(
         optimizer=optax.adam(learning_rate),
         history=history_callback,
         key=key,
+        #sample weight
     )
     return trained_model, history
 

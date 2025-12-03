@@ -237,3 +237,8 @@ def compute_P_batch(F_batch, G_ti):
     compute_P_vectorized = jax.vmap(grad_W, in_axes=(0, None))
     
     return compute_P_vectorized(F_batch, G_ti)
+
+def compute_path_weight(P_path):
+    # Frobenius norm of each stress tensor
+    norms = jnp.linalg.norm(P_path, axis=(1,2))
+    return jnp.mean(norms)      # this is w
