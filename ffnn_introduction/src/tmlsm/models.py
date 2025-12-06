@@ -4,9 +4,11 @@ import equinox as eqx
 import jax
 from jax.nn.initializers import he_normal
 from jaxtyping import PRNGKeyArray, Array
+import jax.numpy as jnp
 import klax
 import optax
 from . import losses as tl
+from . import data_t2 as td2
 
 
 
@@ -26,40 +28,61 @@ class Model(eqx.Module):
         activations: Sequence[Callable],
         *,
         key: PRNGKeyArray,
-        constrain_icnn_weights: bool = False
+        constrain_icnn_weights: bool = False,
+        fully_constrain_icnn_weights: bool = False
     ):
         """
         Initializes a feed-forward neural network.
-        
-        If 'constrain_icnn_weights' is True, applies non-negative
-        weight constraints to all layers except the first.
+
+        ICNN modes:
+        - constrain_icnn_weights=True:
+            Constrain all layers EXCEPT first (standard ICNN).
+
+        - fully_constrain_icnn_weights=True:
+            Constrain ALL layers INCLUDING first (needed for Task 3).
+
+        Only one of these should be True at once.
         """
+
+        # Safety check
+        if constrain_icnn_weights and fully_constrain_icnn_weights:
+            raise ValueError(
+                "Choose either constrain_icnn_weights OR fully_constrain_icnn_weights, not both."
+            )
+
         keys = jax.random.split(key, len(layer_sizes) - 1)
-        
         built_layers = []
-        
-        # --- Build the first layer (always unconstrained) ---
+
+        # -------------------------
+        # First layer
+        # -------------------------
+        first_wrapper = klax.NonNegative if fully_constrain_icnn_weights else None
+
         first_layer = klax.nn.Linear(
             layer_sizes[0],
             layer_sizes[1],
             weight_init=he_normal(),
             key=keys[0],
-            weight_wrap=None  # Explicitly unconstrained
+            weight_wrap=first_wrapper
         )
         built_layers.append(first_layer)
-        
-        # --- Build all subsequent layers (constrained or unconstrained) ---
+
+        # -------------------------
+        # Remaining layers
+        # -------------------------
         for in_size, out_size, k in zip(layer_sizes[1:-1], layer_sizes[2:], keys[1:]):
-            
-            # Conditionally set the wrapper
-            wrapper = klax.NonNegative if constrain_icnn_weights else None
-            
+
+            if constrain_icnn_weights or fully_constrain_icnn_weights:
+                wrapper = klax.NonNegative
+            else:
+                wrapper = None
+
             layer = klax.nn.Linear(
                 in_size,
                 out_size,
                 weight_init=he_normal(),
                 key=k,
-                weight_wrap=wrapper  # <-- This is the new, correct way
+                weight_wrap=wrapper
             )
             built_layers.append(layer)
 
@@ -71,6 +94,7 @@ class Model(eqx.Module):
         for layer, activation in zip(self.layers, self.activations):
             x = activation(layer(x))
         return x
+
 
 
 
@@ -86,7 +110,8 @@ def build(
     num_hidden_layers: int,
     nodes_per_layer: int,
     activations: Union[Callable, Sequence[Callable]],
-    constrain_icnn_weights: bool = False
+    constrain_icnn_weights: bool = False,
+    fully_constrain_icnn_weights: bool = False
 ):
     """
     Builds and returns a model instance with flexible activation functions.
@@ -115,7 +140,8 @@ def build(
         layer_sizes=layer_sizes,
         activations=final_activations,
         key=key,
-        constrain_icnn_weights=constrain_icnn_weights
+        constrain_icnn_weights=constrain_icnn_weights,
+        fully_constrain_icnn_weights = fully_constrain_icnn_weights
     )
 
 
@@ -174,7 +200,8 @@ class SobolevModel(eqx.Module):
         num_hidden_layers: int,
         nodes_per_layer: int,
         activation: Callable,
-        is_icnn: bool
+        is_icnn: bool,
+        is_ficnn: bool
     ):
         """
         Initializes the model, which internally builds the
@@ -189,7 +216,8 @@ class SobolevModel(eqx.Module):
             num_hidden_layers=num_hidden_layers,
             nodes_per_layer=nodes_per_layer,
             activations=activation,
-            constrain_icnn_weights=is_icnn
+            constrain_icnn_weights=is_icnn,
+            fully_constrain_icnn_weights=is_ficnn
         )
 
     def __call__(self, x: Array) -> tuple[Array, Array]:
@@ -213,3 +241,94 @@ class SobolevModel(eqx.Module):
         grad = grad_fn(x)
         
         return value, grad
+    
+
+class SobolevModel_WI(eqx.Module):
+    nn: eqx.Module
+    G_ti: jnp.ndarray
+
+    def __init__(
+        self,
+        G_ti,
+        key: PRNGKeyArray,
+        input_dim: int,
+        output_dim: int,
+        num_hidden_layers: int,
+        nodes_per_layer: int,
+        activation: Callable,
+        is_icnn: bool,
+        is_ficnn: bool
+    ):
+        
+        """
+        Initializes the model, which internally builds the
+        network it needs to differentiate.
+        """
+        key, nn_key = jax.random.split(key)
+        
+        self.nn = build(        
+        key=nn_key,
+        input_dim=input_dim,
+        output_dim=output_dim,
+        num_hidden_layers=num_hidden_layers,
+        nodes_per_layer=nodes_per_layer,
+        activations=activation,
+        constrain_icnn_weights=is_icnn,
+        fully_constrain_icnn_weights=is_ficnn
+        )
+        self.G_ti = G_ti
+
+    def compute_dI_dF(self, F):
+        """Jacobian of invariants wrt a single F."""
+        return jax.jacobian(
+            lambda FF: td2.compute_all_invariants(FF[None, :, :], self.G_ti)[0],
+            argnums=0
+        )(F)
+
+    def __call__(self, inputs):
+        """Compute W and P for a SINGLE sample. klax.fit will vmap this."""
+        
+        F, I = inputs   # each of shape (3,3) and (5,)
+
+        # Energy
+        W = self.nn(I)
+
+        # dW/dI
+        dW_dI = jax.grad(self.nn)(I)
+
+        # dI/dF
+        dI_dF = self.compute_dI_dF(F)
+
+        # Piola stress
+        P = jnp.tensordot(dW_dI, dI_dF, axes=1)
+
+        return W, P
+    
+
+def train_WI(
+    model,
+    train_data,
+    key,
+    steps,
+    batch_size,
+    learning_rate,
+    loss_fn 
+):
+    """
+    train_data = ((F_train, I_train), (W_true, P_true))
+    """
+
+    history = klax.HistoryCallback(log_every=100, verbose=False)
+
+    trained_model, history = klax.fit(
+        model,
+        train_data,
+        batch_size=batch_size,
+        steps=steps,
+        loss_fn=loss_fn,
+        optimizer=optax.adam(learning_rate),
+        history=history,
+        key=key,
+    )
+
+    return trained_model, history

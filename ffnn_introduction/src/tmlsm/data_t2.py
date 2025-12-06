@@ -154,10 +154,11 @@ def compute_all_invariants(F, G_ti):
     """
     I1 = compute_I1(F)
     J = compute_J(F)
+    minus_J = -J
     I4 = compute_I4(F, G_ti)
     I5 = compute_I5(F, G_ti)
     
-    return jnp.stack([I1, J, I4, I5], axis=-1)
+    return jnp.stack([I1, J, minus_J, I4, I5], axis=-1)
 
 def compute_analytical_W(I):
     """
@@ -242,3 +243,12 @@ def compute_path_weight(P_path):
     # Frobenius norm of each stress tensor
     norms = jnp.linalg.norm(P_path, axis=(1,2))
     return jnp.mean(norms)      # this is w
+
+def add_minus_J(I_raw):
+    I1 = I_raw[:, 0]
+    J  = I_raw[:, 1]
+    I4 = I_raw[:, 2]
+    I5 = I_raw[:, 3]
+
+    return jnp.column_stack([I1, J, -J, I4, I5])
+
