@@ -56,8 +56,6 @@ class SobolevLoss(klax.Loss):
     
     
 class WeightedMSE(klax.Loss):
-    def __init__(self, weights):
-        self.weights = weights
 
     def __call__(self, model, batch, batch_axis):
         x, (y, w) = batch
