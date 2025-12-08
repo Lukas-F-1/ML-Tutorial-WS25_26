@@ -4,6 +4,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import jax.numpy as jnp
 import jax
+from . import data_t2 as td2
 
 def visualize_deformation_3d(F, step_index=0):
     """
@@ -308,3 +309,114 @@ def evaluate_MS_predictions(Y_true, Y_pred, title_prefix="MS Test Evaluation"):
         "max_error": jnp.max(jnp.abs(errors)),
         "frob_mean": jnp.mean(E_frob),
     }
+
+def plot_loadpath(F_path, P_path, W_path, title_prefix="Loadpath"):
+    """
+    Produces 3 figures:
+      1. Principal stretches
+      2. Strain energy
+      3. 3×3 grid of stress tensor components
+      
+    Parameters
+    ----------
+    F_path : array, shape (T,3,3)
+        Deformation gradients along the loadpath
+    P_path : array, shape (T,3,3)
+        First Piola stress tensors
+    W_path : array, shape (T,)
+        Strain energies
+    title_prefix : str
+        Label printed on top of each plot
+    """
+    
+    # -------------------------------------------------------
+    # 1. Principal stretches: eigenvalues of C = FᵀF
+    # -------------------------------------------------------
+    C_path = jnp.einsum("tij,tkj->tik", F_path.transpose(0,2,1), F_path)
+    evals = jnp.linalg.eigvalsh(C_path)      # symmetric eigenvalues
+    lambdas = jnp.sqrt(evals)                # principal stretches
+
+    plt.figure(figsize=(7,5))
+    plt.plot(lambdas[:,0], label="λ₁")
+    plt.plot(lambdas[:,1], label="λ₂")
+    plt.plot(lambdas[:,2], label="λ₃")
+    plt.title(f"{title_prefix} – Principal Stretches")
+    plt.xlabel("Time step")
+    plt.ylabel("Stretch")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+    # -------------------------------------------------------
+    # 2. Strain energy
+    # -------------------------------------------------------
+    plt.figure(figsize=(7,5))
+    plt.plot(W_path, linewidth=2)
+    plt.title(f"Energy – {title_prefix}")
+    plt.xlabel("Time step")
+    plt.ylabel("Strain energy W")
+    plt.grid(True)
+    plt.show()
+
+    # -------------------------------------------------------
+    # 3. Stress components (3×3 grid)
+    # -------------------------------------------------------
+    fig, axes = plt.subplots(3, 3, figsize=(12, 10))
+    axes = axes.flatten()
+
+    P_flat = P_path.reshape(len(P_path), 9)
+
+    for i in range(9):
+        ax = axes[i]
+        ax.plot(P_flat[:, i], linewidth=2)
+        ax.set_title(f"P component {i}")
+        ax.grid(True)
+
+    plt.suptitle(f"Stress Components – {title_prefix}", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+def plot_dataset_distributions(W_all, P_all, bins=100):
+    """
+    Visualizes global distributions of strain energy W and stress tensor P.
+    
+    Parameters:
+    -----------
+    W_all : array (N,)
+        All strain energy values.
+    P_all : array (N, 3, 3)
+        All first Piola–Kirchhoff stress tensors.
+    bins : int
+        Number of histogram bins.
+    """
+
+    # Flatten stress to shape (N, 9)
+    P_flat = P_all.reshape(-1, 9)
+
+    # ---------------------------
+    # 1. Histogram for W
+    # ---------------------------
+    plt.figure(figsize=(8, 5))
+    plt.hist(W_all, bins=bins, color="steelblue", alpha=0.75)
+    plt.title("Distribution of Strain Energy W")
+    plt.xlabel("W")
+    plt.ylabel("Frequency")
+    plt.grid(True)
+    plt.show()
+
+    # ---------------------------
+    # 2. Histograms for P components
+    # ---------------------------
+    fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+    axes = axes.flatten()
+
+    for i in range(9):
+        ax = axes[i]
+        ax.hist(P_flat[:, i], bins=bins, alpha=0.75, color="salmon")
+        ax.set_title(f"P component {i}")
+        ax.grid(True)
+
+    plt.suptitle("Distribution of Stress Components P_ij")
+    plt.tight_layout()
+    plt.show()
+

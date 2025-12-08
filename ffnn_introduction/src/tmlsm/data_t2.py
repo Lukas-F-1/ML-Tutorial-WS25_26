@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import os
+import pandas as pd
 
 def load_hyperelastic_data(filepath):
   """
@@ -56,6 +57,18 @@ def load_invariants(filepath):
 
   return raw
 
+#helper for invariant computation
+def cofactor(C):
+    """
+    Computes cof(C) = det(C) * inv(C)
+    C has shape (...,3,3)
+    """
+    detC = jnp.linalg.det(C)
+    C_inv = jnp.linalg.inv(C)
+    cofC = detC[..., None, None] * C_inv
+    return cofC
+
+#all needed invariants
 def compute_I1(F):
   """
   Computes I1 = tr(C) = tr(F^T F)
@@ -72,6 +85,14 @@ def compute_I1(F):
   """
   C = jnp.swapaxes(F, -2, -1) @ F  # C = F^T F
   return jnp.trace(C, axis1=-2, axis2=-1)
+
+def compute_I2(F):
+    """
+    I2 = tr(cof(C))
+    """
+    C = F.swapaxes(-1,-2) @ F
+    cofC = cofactor(C)
+    return jnp.trace(cofC, axis1=-2, axis2=-1)
 
 def compute_J(F):
   """
@@ -137,6 +158,37 @@ def compute_I5(F, G_ti):
     # tr(cof(C) * G_ti)
     result = cof_C @ G_ti
     return jnp.trace(result, axis1=-2, axis2=-1)
+
+def compute_I7(F, G_cub):
+    # C = Fᵀ F, shape (...,3,3)
+    C = F.swapaxes(-1, -2) @ F
+
+    # contraction 1: B_{kl} = sum_{ij} G_{ijkl} * C_{ij}
+    B = jnp.einsum("ijkl,...ij->...kl", G_cub, C)
+
+    # contraction 2: I7 = sum_{kl} B_{kl} * C_{kl}
+    I7 = jnp.einsum("...kl,...kl->...", B, C)
+
+    return I7
+
+
+def compute_I11(F, G_cub):
+    C = F.swapaxes(-1, -2) @ F
+
+    # determinant of C
+    detC = jnp.linalg.det(C)
+
+    # inverse of C
+    Cinv = jnp.linalg.inv(C)
+
+    # cof(C) = det(C) * C^{-1}
+    cofC = detC[..., None, None] * Cinv
+
+    B = jnp.einsum("ijkl,...ij->...kl", G_cub, cofC)
+    I11 = jnp.einsum("...kl,...kl->...", B, cofC)
+
+    return I11
+
 
 def compute_all_invariants(F, G_ti):
     """
@@ -496,3 +548,75 @@ def prepare_PANN_split(
     test_data  = ((F_test,  I_test),  (W_test,  P_test))
 
     return train_data, test_data, train_idx, test_idx
+
+
+def load_multiscale_paths(path):
+    """
+    Loads CPShub multiscale dataset and returns a list of deformation paths.
+
+    Returns
+    -------
+    F_paths : list of arrays, each (T_i, 3, 3)
+    P_paths : list of arrays, each (T_i, 3, 3)
+    W_paths : list of arrays, each (T_i,)
+    J_paths : list of arrays, each (T_i,)
+    mode_names : list of strings
+    """
+    store = pd.HDFStore(path, "r")
+    keys = store.keys()
+
+    F_paths = []
+    P_paths = []
+    W_paths = []
+    J_paths = []
+    mode_names = []
+
+    for key in keys:
+        df = store[key]
+
+        # Extract data
+        F = df[[f"F{i}{j}" for i in [1,2,3] for j in [1,2,3]]].values.reshape(-1, 3, 3)
+        P = df[[f"P{i}{j}" for i in [1,2,3] for j in [1,2,3]]].values.reshape(-1, 3, 3)
+        W = df["StrEn"].values
+        J = df["J"].values
+
+        F_paths.append(jnp.array(F))
+        P_paths.append(jnp.array(P))
+        W_paths.append(jnp.array(W))
+        J_paths.append(jnp.array(J))
+        mode_names.append(key)
+
+    store.close()
+    return F_paths, P_paths, W_paths, J_paths, mode_names
+
+def G_cub():
+    e1 = jnp.array([1.0, 0.0, 0.0])
+    e2 = jnp.array([0.0, 1.0, 0.0])
+    e3 = jnp.array([0.0, 0.0, 1.0])
+    G = jnp.einsum("i,j,k,l->ijkl", e1, e1, e1, e1)
+    G += jnp.einsum("i,j,k,l->ijkl", e2, e2, e2, e2)
+    G += jnp.einsum("i,j,k,l->ijkl", e3, e3, e3, e3)
+    return G
+
+
+def compute_all_invariants_cubic(F, G_cub):
+    """
+    Computes invariants for cubic anisotropy:
+    (I1, I2, J, -J, I7, I11)
+    """
+    C = F.swapaxes(-1,-2) @ F
+    I1 = jnp.trace(C, axis1=-2, axis2=-1)
+
+    # J invariants
+    J = jnp.linalg.det(F)   # or sqrt(det(C))
+    
+    # I2 invariant
+    I2 = compute_I2(F)
+
+    # higher-order cubic invariants
+    I7  = compute_I7(F, G_cub)
+    I11 = compute_I11(F, G_cub)
+
+    invariants = jnp.stack([I1, I2, J, -J, I7, I11], axis=-1)
+    return invariants
+
