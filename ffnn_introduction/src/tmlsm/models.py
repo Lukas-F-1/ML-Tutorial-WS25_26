@@ -286,6 +286,68 @@ class SobolevModel_WI_Cubic(eqx.Module):
 
         return W, P
 
+# For task 5.3 Polyconvex ICNN as ICNN(F, cof F, det F)=W(F)
+class SobolevModel_WF(eqx.Module):
+    """
+    Polyconvex deformation-gradient-based neural network model W^F.
+    Inputs: y(F) = (F, cofF, detF) ∈ R^19
+    Output: W(F), P(F)
+    """
+    nn: eqx.Module
+
+    def __init__(
+        self,
+        key,
+        input_dim=19,
+        output_dim=1,
+        num_hidden_layers=3,
+        nodes_per_layer=64,
+        activation=jax.nn.tanh,
+        is_icnn=False,
+        is_ficnn=False
+    ):
+        key, nn_key = jax.random.split(key)
+
+        self.nn = build(
+            key=nn_key,
+            input_dim=input_dim,
+            output_dim=output_dim,
+            num_hidden_layers=num_hidden_layers,
+            nodes_per_layer=nodes_per_layer,
+            activations=activation,
+            constrain_icnn_weights=is_icnn,
+            fully_constrain_icnn_weights=is_ficnn
+        )
+
+    def compute_inputs(self, F):
+        detF = jnp.linalg.det(F)
+        cofF = detF * jnp.linalg.inv(F).T
+        return jnp.concatenate([F.reshape(-1),
+                                cofF.reshape(-1),
+                                detF.reshape(-1)])
+
+    def compute_dinputs_dF(self, F):
+        # Jacobian dy/dF, shape (19,3,3)
+        return jax.jacobian(self.compute_inputs)(F)
+
+    def __call__(self, inputs):
+        """
+        inputs: F (3×3)
+        returns: (W, P)
+        """
+        F = inputs
+
+        y = self.compute_inputs(F)           # (19,)
+        W = self.nn(y)                       # scalar output
+
+        dW_dy = jax.grad(self.nn)(y)         # (19,)
+
+        dy_dF = self.compute_dinputs_dF(F)   # (19,3,3)
+
+        # Contract: P_ij = sum_k dW/dy_k * dy_k/dF_ij
+        P = jnp.tensordot(dW_dy, dy_dF, axes=1)   # (3,3)
+
+        return W, P
 
 
 

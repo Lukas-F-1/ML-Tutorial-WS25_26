@@ -620,3 +620,210 @@ def compute_all_invariants_cubic(F, G_cub):
     invariants = jnp.stack([I1, I2, J, -J, I7, I11], axis=-1)
     return invariants
 
+#helper to compute inputs for polyconvex ICNN in section 5.3 W_F
+def compute_polyconvex_inputs(F):
+    """
+    F: (3,3)
+    returns y: (19,)
+    ordering: 9 from F, 9 from cofF, 1 from detF
+    """
+    detF = jnp.linalg.det(F)
+    cofF = detF * jnp.linalg.inv(F).T   # cof(F) = det(F) F^{-T}
+
+    return jnp.concatenate([
+        F.reshape(-1),
+        cofF.reshape(-1),
+        detF.reshape(-1)
+    ])
+
+import jax
+import jax.numpy as jnp
+
+def random_rotation(key):
+    """Generate random rotation matrix Q ∈ SO(3)."""
+    q = jax.random.normal(key, (4,))
+    q = q / jnp.linalg.norm(q)
+    w, x, y, z = q
+
+    R = jnp.array([
+        [1-2*(y*y+z*z),   2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z),   1-2*(x*x+z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y),   2*(y*z + w*x), 1-2*(x*x+y*y)]
+    ])
+    return R
+
+#evaluation of polyconvex ICNN from 5.3 W_F
+import jax
+import jax.numpy as jnp
+
+def random_rotation(key):
+    """Generate random rotation matrix Q ∈ SO(3)."""
+    q = jax.random.normal(key, (4,))
+    q = q / jnp.linalg.norm(q)
+    w, x, y, z = q
+
+    R = jnp.array([
+        [1-2*(y*y+z*z),   2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z),   1-2*(x*x+z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y),   2*(y*z + w*x), 1-2*(x*x+y*y)]
+    ])
+    return R
+
+
+################OLDDDDD
+# def evaluate_multiple_observers_fast(model, F_test, num_observers=10, key=jax.random.PRNGKey(0)):
+#     """
+#     Vectorized objectivity evaluation for WF_model.
+#     Super fast: no Python loops over samples.
+#     """
+
+#     n_samples = F_test.shape[0]
+
+#     # ----------------------------------------------------
+#     # 1) Generate random rotation matrices (num_observers, 3, 3)
+#     # ----------------------------------------------------
+#     keys = jax.random.split(key, num_observers)
+#     Q = jax.vmap(random_rotation)(keys)
+
+#     # ----------------------------------------------------
+#     # 2) Compute all base predictions in one shot
+#     # ----------------------------------------------------
+#     W0, P0 = jax.vmap(model)(F_test)    # (N,), (N, 3, 3)
+
+#     # ----------------------------------------------------
+#     # 3) Compute all rotated F's in one batched operation
+#     # ----------------------------------------------------
+#     # F_rot has shape (num_observers, N, 3, 3)
+#     F_rot = jax.vmap(lambda q: q @ F_test)(Q)
+
+#     # ----------------------------------------------------
+#     # 4) Predict on rotated inputs (vectorized)
+#     # ----------------------------------------------------
+#     W_rot, P_rot = jax.vmap(
+#         lambda F_batch: jax.vmap(model)(F_batch)
+#     )(F_rot)   # shapes: W_rot (obs, N), P_rot (obs, N, 3, 3)
+
+#     # ----------------------------------------------------
+#     # 5) Compute expected rotated stresses: Q P0
+#     # ----------------------------------------------------
+#     P_expected = jax.vmap(lambda q: q @ P0)(Q)  # (obs, N, 3, 3)
+
+#     # ----------------------------------------------------
+#     # 6) Compute objectivity errors
+#     # ----------------------------------------------------
+#     W_err = jnp.abs(W_rot - W0)                # (obs, N)
+#     P_err = jnp.linalg.norm(P_rot - P_expected, axis=(2,3))  # (obs, N)
+
+#     return {
+#         "W_error_mean": float(jnp.mean(W_err)),
+#         "W_error_max":  float(jnp.max(W_err)),
+#         "P_error_mean": float(jnp.mean(P_err)),
+#         "P_error_max":  float(jnp.max(P_err)),
+#     }
+
+import jax
+import jax.numpy as jnp
+
+def evaluate_multiple_observers(
+    model,
+    F_test,
+    num_observers=10,
+    key=jax.random.PRNGKey(0),
+    mode="WF",
+    G=None,   # only needed for WI models
+):
+    """
+    Vectorized objectivity evaluation for WF and WI models.
+
+    Parameters
+    ----------
+    model : callable
+        WF model: model(F)              -> (W, P)
+        WI model: model(F, I)           -> (W, P)
+
+    F_test : (N, 3, 3)
+        Deformation gradients.
+
+    num_observers : int
+        Number of random Q ∈ SO(3) rotations.
+
+    mode : str
+        "WF" or "WI".
+
+    key : PRNGKey
+        Random seed.
+
+    G : (3,3) or (3,3,3,3)
+        Structural/anisotropy tensor for invariant computation.
+        Required in WI mode.
+
+    Returns
+    -------
+    dict with mean/max errors for W and P.
+    """
+
+    assert mode in ("WF", "WI"), "mode must be 'WF' or 'WI'"
+
+    # -----------------------------------------
+    # 1) Generate rotation matrices
+    # -----------------------------------------
+    keys = jax.random.split(key, num_observers)
+    Q = jax.vmap(random_rotation)(keys)   # (obs, 3, 3)
+
+    # -----------------------------------------
+    # 2) Evaluate original model predictions
+    # -----------------------------------------
+    if mode == "WF":
+        W0, P0 = jax.vmap(model)(F_test)  # (N,), (N,3,3)
+
+    elif mode == "WI":
+        assert G is not None, "G tensor required for WI invariants"
+        I_test = compute_all_invariants_cubic(F_test, G)
+        W0, P0 = jax.vmap(lambda F, I: model((F, I)))(F_test, I_test)
+
+
+    # -----------------------------------------
+    # 3) Rotate F → QF  (obs, N, 3,3)
+    # -----------------------------------------
+    F_rot = jax.vmap(lambda q: q @ F_test)(Q)
+
+    # -----------------------------------------
+    # 4) Evaluate model on rotated F
+    # -----------------------------------------
+    if mode == "WF":
+        # (obs, N), (obs, N,3,3)
+        W_rot, P_rot = jax.vmap(lambda F_batch: jax.vmap(model)(F_batch))(F_rot)
+
+    elif mode == "WI":
+        # Compute invariants for all rotated F
+        # Input: (obs, N, 3,3)
+        compute_I_rot = jax.vmap(
+            lambda Fbatch: compute_all_invariants_cubic(Fbatch, G)
+        )
+        I_rot = compute_I_rot(F_rot)   # (obs, N, dimI)
+
+        # Apply model to each observer batch
+        W_rot, P_rot = jax.vmap(lambda F,I: model((F,I)))(F_rot, I_rot)
+
+
+    # -----------------------------------------
+    # 5) Expected rotated stresses Q P0
+    # -----------------------------------------
+    P_expected = jax.vmap(lambda q: q @ P0)(Q)  # (obs, N, 3,3)
+
+    # -----------------------------------------
+    # 6) Objectivity errors
+    # -----------------------------------------
+    W_err = jnp.abs(W_rot - W0)                   # (obs, N)
+    P_err = jnp.linalg.norm(P_rot - P_expected, axis=(2,3))
+
+    # -----------------------------------------
+    # 7) Return summary statistics
+    # -----------------------------------------
+    return {
+        "W_error_mean": float(jnp.mean(W_err)),
+        "W_error_max":  float(jnp.max(W_err)),
+        "P_error_mean": float(jnp.mean(P_err)),
+        "P_error_max":  float(jnp.max(P_err)),
+    }
+
