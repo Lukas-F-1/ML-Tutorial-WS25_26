@@ -5,6 +5,68 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import jax.numpy as jnp
 import jax
 
+def plot_load_path_space(datasets_dict, title="Load Path Map: Interpolation Check"):
+    """
+    Visualizes the load paths in three projections:
+    1. F11 vs F22
+    2. F11 vs F33
+    3. F22 vs F33
+    
+    Arranged side-by-side in one row.
+    """
+    # Create 3 subplots side-by-side
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5)) 
+    
+    # Define the pairs we want to plot (Index 0=F11, 1=F22, 2=F33)
+    # Format: (x_idx, y_idx, x_label, y_label)
+    plot_configs = [
+        (0, 1, r"$F_{11}$ (Fiber)", r"$F_{22}$ (Transverse)"),
+        (0, 2, r"$F_{11}$ (Fiber)", r"$F_{33}$ (Normal)"),
+        (1, 2, r"$F_{22}$ (Transverse)", r"$F_{33}$ (Normal)")
+    ]
+
+    # Iterate over datasets
+    for label, data in datasets_dict.items():
+        # --- ROBUST UNPACKING ---
+        if isinstance(data, (tuple, list)):
+            F = data[0]
+        else:
+            F = data
+            
+        # Style logic
+        is_test = "Test" in label
+        style = '--' if is_test else '-'
+        alpha = 1.0 if is_test else 0.6
+        width = 2.5 if is_test else 1.5
+
+        # Loop through the 3 subplots
+        for ax, (x_idx, y_idx, x_lbl, y_lbl) in zip(axes, plot_configs):
+            x_data = F[:, x_idx, x_idx] # Diagonal element
+            y_data = F[:, y_idx, y_idx] # Diagonal element
+            
+            ax.plot(x_data, y_data, linestyle=style, linewidth=width, alpha=alpha, label=label)
+
+    # Styling for each subplot
+    for i, ax in enumerate(axes):
+        # Reference point (1,1)
+        ax.scatter([1], [1], color='black', marker='x', s=80, zorder=10)
+        
+        # Labels from config
+        ax.set_xlabel(plot_configs[i][2], fontsize=12)
+        ax.set_ylabel(plot_configs[i][3], fontsize=12)
+        
+        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.axis('equal') # Keep geometric proportions
+        
+        # Only show legend on the first plot to avoid clutter, 
+        # or put it outside. Let's put it on the last one or first.
+        if i == 0:
+            ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
+
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
 def visualize_deformation_3d(F, step_index=0):
     """
     Visualisiert die Deformation eines Einheitswürfels für einen spezifischen Zeitschritt.
@@ -215,11 +277,6 @@ def plot_model_and_history(model, X_cal, Y_cal, history, *,
     plt.tight_layout()
     plt.show()
 
-import matplotlib.pyplot as plt
-import jax.numpy as jnp
-import jax
-
-
 def evaluate_MS_predictions(Y_true, Y_pred, title_prefix="MS Test Evaluation"):
     """
     Visualizes:
@@ -308,3 +365,287 @@ def evaluate_MS_predictions(Y_true, Y_pred, title_prefix="MS Test Evaluation"):
         "max_error": jnp.max(jnp.abs(errors)),
         "frob_mean": jnp.mean(E_frob),
     }
+
+def evaluate_model_performance(model, inputs, P_true, W_true=None, history=None, title="Model Evaluation"):
+
+    """
+    A universal function for evaluating models (Naive & PANN).
+    
+    Features:
+    - Automatically generates predictions (handles both Naive and PANN structures).
+    - Detects whether Strain Energy (W) is predicted.
+    - Plots Training Loss History (optional).
+    - Plots Energy Comparison (optional).
+    - Plots Stress Comparison (always).
+    
+    Parameters
+    ----------
+    model : Callable
+        The trained model (e.g., M_S or W_I_model).
+    inputs : Array or Tuple
+        The input for the model. 
+        - For Naive: X_test (N, 6)
+        - For PANN: (F_test, I_test) Tuple
+    P_true : Array (N, 3, 3) or (N, 9)
+        The ground truth stresses.
+    W_true : Array (N,), optional
+        The ground truth energies. If None, the energy plot is skipped.
+    history : History Object, optional
+        The history object from klax. If provided, the training loss is plotted.
+    title : str
+        Title prefix for the plots.
+    """
+    
+    print(f"\n{'='*10} START EVALUATION: {title} {'='*10}")
+
+    # --- 1. Generate Predictions ---
+    # Use vmap to enable batch processing for single-sample models
+    preds = jax.vmap(model)(inputs)
+
+    # Distinguish: Does the model return only P (Naive) or (W, P) (PANN)?
+    if isinstance(preds, tuple) and len(preds) == 2:
+        # Case: PANN returns (W, P)
+        W_pred, P_pred = preds
+    else:
+        # Case: Naive returns only P
+        W_pred = None
+        P_pred = preds
+
+    # --- 2. Adjust Data Formats (Reshape to N, 9) ---
+    # Ensure P_true and P_pred are flat arrays of shape (N, 9)
+    if P_pred.ndim == 3: # (N, 3, 3) -> (N, 9)
+        P_pred = P_pred.reshape(P_pred.shape[0], 9)
+    
+    if P_true.ndim == 3: # (N, 3, 3) -> (N, 9)
+        P_true = P_true.reshape(P_true.shape[0], 9)
+
+    # --- 3. Plot: Training History (Optional) ---
+    if history is not None:
+        plt.figure(figsize=(8, 4))
+        plt.plot(history.loss, linewidth=2, label="Training Loss")
+        plt.yscale("log")
+        plt.title(f"{title}: Training History")
+        plt.xlabel("Step")
+        plt.ylabel("Loss (Log)")
+        plt.grid(True, which="both", ls="-", alpha=0.5)
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    # --- 4. Plot: Energy Comparison (Optional) ---
+    # Only plot if W_true is provided AND the model actually predicts W
+    if W_true is not None and W_pred is not None:
+        plt.figure(figsize=(10, 5))
+        plt.plot(W_true, 'k-', label="Ground Truth", linewidth=2, alpha=0.8)
+        plt.plot(W_pred, 'r--', label="Prediction", linewidth=2)
+        plt.title(f"{title}: Strain Energy Density (W)")
+        plt.xlabel("Sample Index")
+        plt.ylabel("W")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+    elif W_true is not None and W_pred is None:
+        print("Note: W_true was provided, but the model does not predict W (plot skipped).")
+
+    # --- 5. Plot: Stress Evaluation ---
+    # Call the existing subroutine for detailed stress metrics
+    print(f"--- Stress Evaluation ({title}) ---")
+    metrics = evaluate_MS_predictions(P_true, P_pred, title_prefix=title)
+    
+    return metrics
+
+def plot_stress_stretch_comparison(pred_dict, F_true, P_true, component_indices=(0,0), title="Stress-Stretch Curve"):
+    """
+    Plots Stress (P) vs. Deformation (F) for a specific component.
+    Crucial for checking physical validity (monotonicity, convexity).
+
+    Parameters
+    ----------
+    pred_dict : dict
+        Dictionary containing predictions. 
+        Format: { "Label": (W_pred, P_pred) } or { "Label": P_pred }
+    F_true : Array (N, 3, 3)
+        Input deformation gradients (used for x-axis).
+    P_true : Array (N, 3, 3) or (N, 9)
+        Ground truth stress.
+    component_indices : tuple (i, j)
+        Indices of the component to plot (e.g., (0,0) for 11-component).
+    title : str
+        Plot title.
+    """
+    
+    i, j = component_indices
+    
+    # --- 1. Prepare X-Axis (Deformation) ---
+    # Extract the relevant component from F
+    x_raw = F_true[:, i, j]
+    
+    # Determine sorted indices to prevent "spaghetti plots" if data is unsorted
+    sort_idx = np.argsort(x_raw)
+    x_sorted = x_raw[sort_idx]
+    
+    plt.figure(figsize=(10, 6))
+    
+    # --- 2. Plot Ground Truth ---
+    # Ensure P_true is shaped (N, 3, 3) for indexing
+    if P_true.ndim == 2:
+        P_true_Reshaped = P_true.reshape(-1, 3, 3)
+    else:
+        P_true_Reshaped = P_true
+        
+    y_true = P_true_Reshaped[:, i, j][sort_idx]
+    
+    plt.plot(x_sorted, y_true, 'k-', linewidth=3, alpha=0.5, label="Ground Truth")
+    
+    # --- 3. Plot Models from Dictionary ---
+    for label, preds in pred_dict.items():
+        # Handle tuple (W, P) vs array P
+        if isinstance(preds, tuple) and len(preds) == 2:
+            _, P_pred = preds
+        else:
+            P_pred = preds
+            
+        # Reshape if necessary
+        if P_pred.ndim == 2:
+            P_pred = P_pred.reshape(-1, 3, 3)
+            
+        # Extract and sort y-values
+        y_pred = P_pred[:, i, j][sort_idx]
+        
+        plt.plot(x_sorted, y_pred, '--', linewidth=2, label=label)
+
+    # --- 4. Styling ---
+    # Use 1-based indexing for label (11 instead of 00)
+    comp_label = f"{i+1}{j+1}"
+    plt.title(f"{title}\nComponent P_{{{comp_label}}} vs F_{{{comp_label}}}")
+    plt.xlabel(f"Deformation Gradient F_{{{comp_label}}}")
+    plt.ylabel(f"Piola-Kirchhoff Stress P_{{{comp_label}}}")
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+
+
+    """
+    Erzeugt einen 'Textbuch-Style' Plot mit Plotly:
+    - Achsen mit Pfeilen
+    - Griechische Symbole (Sigma, Eta/Lambda)
+    - Kein Kasten
+    """
+    
+    i, j = component_indices
+    
+    # --- 1. Daten vorbereiten & sortieren ---
+    # x-Achse: Deformation F (z.B. F_22)
+    x_raw = F_true[:, i, j]
+    
+    # Sortieren ist essenziell für Linien-Plots!
+    sort_idx = np.argsort(x_raw)
+    x_sorted = x_raw[sort_idx]
+    
+    # Ground Truth sortieren
+    # P sicherstellen als (N, 3, 3)
+    if P_true.ndim == 2:
+        P_true = P_true.reshape(-1, 3, 3)
+    y_true = P_true[:, i, j][sort_idx]
+    
+    # --- 2. Plotly Figure erstellen ---
+    fig = go.Figure()
+
+    # Ground Truth (Dicke graue Linie)
+    fig.add_trace(go.Scatter(
+        x=x_sorted, 
+        y=y_true,
+        mode='lines',
+        name='Ground Truth',
+        line=dict(color='gray', width=4)
+    ))
+
+    # --- 3. Modelle hinzufügen ---
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c'] # Blau, Orange, Grün
+    styles = ['dash', 'dot', 'dashdot']
+    
+    for k, (label, preds) in enumerate(pred_dict.items()):
+        # P extrahieren
+        if isinstance(preds, tuple) and len(preds) == 2:
+            _, P_pred = preds
+        else:
+            P_pred = preds
+            
+        if P_pred.ndim == 2:
+            P_pred = P_pred.reshape(-1, 3, 3)
+            
+        y_pred = P_pred[:, i, j][sort_idx]
+        
+        fig.add_trace(go.Scatter(
+            x=x_sorted, 
+            y=y_pred,
+            mode='lines',
+            name=label,
+            line=dict(color=colors[k % len(colors)], width=3, dash=styles[k % len(styles)])
+        ))
+
+    # --- 4. Styling (Der "Coole" Part) ---
+    
+    # Achsen-Limits bestimmen für Pfeil-Positionierung
+    x_min, x_max = x_sorted.min(), x_sorted.max()
+    y_min, y_max = min(y_true.min(), 0), y_true.max() # Y-Start meist bei 0 oder min
+    
+    # Buffer hinzufügen, damit die Pfeile Platz haben
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    x_limit = x_max + 0.05 * x_range
+    y_limit = y_max + 0.1 * y_range
+
+    fig.update_layout(
+        title=dict(text=f"<b>{title}</b>", x=0.5, y=0.95),
+        font=dict(family="Arial", size=14, color="black"),
+        
+        # Legend oben links "schwebend"
+        legend=dict(
+            x=0.05, y=0.95,
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="Black",
+            borderwidth=0
+        ),
+        plot_bgcolor='white',
+        width=800,
+        height=600,
+        margin=dict(l=60, r=40, t=60, b=60), # Platz für Achsenbeschriftung
+    )
+
+    # ACHSEN KONFIGURATION (Dicke schwarze Linien, kein Rahmen)
+    fig.update_xaxes(
+        showgrid=True, gridwidth=1, gridcolor='lightgray',
+        zeroline=False, # Wir bauen unsere eigene Linie
+        showline=True, linewidth=3, linecolor='black', mirror=False, # mirror=False -> Kein Rahmen oben/rechts
+        range=[x_min - 0.02*x_range, x_limit],
+        title=dict(text=r"$\eta \text{ (Stretch in %)}$", font=dict(size=18)) # Latex Label
+    )
+    
+    fig.update_yaxes(
+        showgrid=True, gridwidth=1, gridcolor='lightgray',
+        zeroline=False,
+        showline=True, linewidth=3, linecolor='black', mirror=False,
+        range=[y_min - 0.05*y_range, y_limit],
+        title=dict(text=r"$\sigma \text{ (Stress)}$", font=dict(size=18)) # Latex Label
+    )
+
+    # --- 5. PFEILE HINZUFÜGEN (Annotations) ---
+    # X-Achsen Pfeil
+    fig.add_annotation(
+        x=x_limit, y=y_min, # Ende der Achse
+        ax=x_limit - 0.01 * x_range, ay=y_min, # Startpunkt des Pfeilkopfes (kurz davor)
+        xref="x", yref="y", axref="x", ayref="y",
+        showarrow=True, arrowhead=2, arrowsize=1.5, arrowwidth=3, arrowcolor="black"
+    )
+    # Y-Achsen Pfeil
+    fig.add_annotation(
+        x=x_min, y=y_limit, 
+        ax=x_min, ay=y_limit - 0.01 * y_range,
+        xref="x", yref="y", axref="x", ayref="y",
+        showarrow=True, arrowhead=2, arrowsize=1.5, arrowwidth=3, arrowcolor="black"
+    )
+
+    fig.show()

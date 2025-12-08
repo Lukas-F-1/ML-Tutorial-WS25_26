@@ -1,6 +1,8 @@
-import jax as jax
+import jax
 import jax.numpy as jnp
 import jax.random as jr
+import jax.random as jrandom
+from jaxtyping import Float, Array
 import numpy as np
 import os
 
@@ -201,7 +203,6 @@ def compute_analytical_W(I):
 
     return term_iso + term_vol + term_aniso + const
 
-
 def compute_W_single(F, G_ti):
     """
     Computes the strain energy W for a single deformation gradient F.
@@ -214,7 +215,6 @@ def compute_W_single(F, G_ti):
     W = compute_analytical_W(invariants)
 
     return W[0]
-
 
 def compute_P_batch(F_batch, G_ti):
     """
@@ -240,7 +240,7 @@ def compute_P_batch(F_batch, G_ti):
     
     return compute_P_vectorized(F_batch, G_ti)
 
-def compute_path_weight(P_path):
+def compute_path_weight(P_path: Float[Array, "batch 3 3"]) -> Float[Array, ""]:
     # Frobenius norm of each stress tensor
     norms = jnp.linalg.norm(P_path, axis=(1,2))
     return jnp.mean(norms)      # this is w
@@ -354,11 +354,6 @@ def compute_concentric_dataset(F, G_ti):
     P = compute_P_batch(F, G_ti)
 
     return C, I, W, P
-
-import jax
-import jax.numpy as jnp
-import jax.random as jrandom
-
 
 def preprocess_all_concentric(all_F, G_ti):
     """
