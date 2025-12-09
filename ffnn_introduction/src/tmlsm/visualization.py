@@ -1,5 +1,7 @@
 ﻿import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import jax.numpy as jnp
@@ -65,6 +67,73 @@ def plot_load_path_space(datasets_dict, title="Load Path Map: Interpolation Chec
             ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
 
     plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+def plot_deformation_state_space(datasets_dict, title="State Space: Shear vs. Stretch Intensity"):
+    """
+    Visualizes the distribution of specific F-components using Boxplots.
+    Perfect for proving interpolation vs. extrapolation component-by-component.
+    
+    Args:
+        datasets_dict: Dictionary with data.
+        components: List of strings determining which tensor components to plot.
+                    e.g. ["F11", "F12", "F22"] -> indices (0,0), (0,1), (1,1)
+    """
+    # 1. Prepare Data for Seaborn (DataFrame format)
+    records = []
+    
+    # Mapping string "F12" -> indices (0,1)
+    comp_map = {
+        "F11": (0,0), "F12": (0,1), "F13": (0,2),
+        "F21": (1,0), "F22": (1,1), "F23": (1,2),
+        "F31": (2,0), "F32": (2,1), "F33": (2,2)
+    }
+    
+    for label, data in datasets_dict.items():
+        F = data[0] if isinstance(data, (tuple, list)) else data
+        
+        # Categorize: Train vs Test for coloring
+        category = "Test" if "Test" in label else "Train"
+        
+        for comp_name in components:
+            if comp_name not in comp_map: continue
+            
+            i, j = comp_map[comp_name]
+            values = F[:, i, j]
+            
+            # Add each point to records
+            for val in values:
+                records.append({
+                    "Dataset": label,
+                    "Type": category,
+                    "Component": comp_name,
+                    "Value": float(val)
+                })
+
+    df = pd.DataFrame(records)
+
+    # 2. Plotting
+    plt.figure(figsize=(14, 6))
+    
+    # We use a boxplot to show the range
+    # Hue separates datasets, X separates components
+    sns.boxplot(data=df, x="Component", y="Value", hue="Dataset", 
+                palette="tab10", gap=.1, whis=1.5)
+    
+    # Optional: Add Strip plot (dots) for Test data to see exact distribution
+    # This shows exactly where the test points lie relative to the train boxes
+    test_df = df[df["Type"] == "Test"]
+    if not test_df.empty:
+        sns.stripplot(data=test_df, x="Component", y="Value", hue="Dataset", 
+                      dodge=True, jitter=True, color="black", alpha=0.3, legend=False)
+
+    plt.title(title, fontsize=16)
+    plt.grid(True, linestyle=':', alpha=0.6, axis='y')
+    
+    # Move legend outside
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+    
     plt.tight_layout()
     plt.show()
 
@@ -476,7 +545,6 @@ def plot_dataset_distributions(W_all, P_all, bins=100):
     plt.suptitle("Distribution of Stress Components P_ij")
     plt.tight_layout()
     plt.show()
-
 
 def evaluate_model_performance(model, inputs, P_true, W_true=None, history=None, title="Model Evaluation"):
 
