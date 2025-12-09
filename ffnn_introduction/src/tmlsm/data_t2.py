@@ -631,25 +631,7 @@ def compute_polyconvex_inputs(F):
         detF.reshape(-1)
     ])
 
-import jax
-import jax.numpy as jnp
-
-def random_rotation(key):
-    """Generate random rotation matrix Q ∈ SO(3)."""
-    q = jax.random.normal(key, (4,))
-    q = q / jnp.linalg.norm(q)
-    w, x, y, z = q
-
-    R = jnp.array([
-        [1-2*(y*y+z*z),   2*(x*y - w*z), 2*(x*z + w*y)],
-        [2*(x*y + w*z),   1-2*(x*x+z*z), 2*(y*z - w*x)],
-        [2*(x*z - w*y),   2*(y*z + w*x), 1-2*(x*x+y*y)]
-    ])
-    return R
-
 #evaluation of polyconvex ICNN from 5.3 W_F
-import jax
-import jax.numpy as jnp
 
 def random_rotation(key):
     """Generate random rotation matrix Q ∈ SO(3)."""
@@ -663,61 +645,6 @@ def random_rotation(key):
         [2*(x*z - w*y),   2*(y*z + w*x), 1-2*(x*x+y*y)]
     ])
     return R
-
-
-################OLDDDDD
-# def evaluate_multiple_observers_fast(model, F_test, num_observers=10, key=jax.random.PRNGKey(0)):
-#     """
-#     Vectorized objectivity evaluation for WF_model.
-#     Super fast: no Python loops over samples.
-#     """
-
-#     n_samples = F_test.shape[0]
-
-#     # ----------------------------------------------------
-#     # 1) Generate random rotation matrices (num_observers, 3, 3)
-#     # ----------------------------------------------------
-#     keys = jax.random.split(key, num_observers)
-#     Q = jax.vmap(random_rotation)(keys)
-
-#     # ----------------------------------------------------
-#     # 2) Compute all base predictions in one shot
-#     # ----------------------------------------------------
-#     W0, P0 = jax.vmap(model)(F_test)    # (N,), (N, 3, 3)
-
-#     # ----------------------------------------------------
-#     # 3) Compute all rotated F's in one batched operation
-#     # ----------------------------------------------------
-#     # F_rot has shape (num_observers, N, 3, 3)
-#     F_rot = jax.vmap(lambda q: q @ F_test)(Q)
-
-#     # ----------------------------------------------------
-#     # 4) Predict on rotated inputs (vectorized)
-#     # ----------------------------------------------------
-#     W_rot, P_rot = jax.vmap(
-#         lambda F_batch: jax.vmap(model)(F_batch)
-#     )(F_rot)   # shapes: W_rot (obs, N), P_rot (obs, N, 3, 3)
-
-#     # ----------------------------------------------------
-#     # 5) Compute expected rotated stresses: Q P0
-#     # ----------------------------------------------------
-#     P_expected = jax.vmap(lambda q: q @ P0)(Q)  # (obs, N, 3, 3)
-
-#     # ----------------------------------------------------
-#     # 6) Compute objectivity errors
-#     # ----------------------------------------------------
-#     W_err = jnp.abs(W_rot - W0)                # (obs, N)
-#     P_err = jnp.linalg.norm(P_rot - P_expected, axis=(2,3))  # (obs, N)
-
-#     return {
-#         "W_error_mean": float(jnp.mean(W_err)),
-#         "W_error_max":  float(jnp.max(W_err)),
-#         "P_error_mean": float(jnp.mean(P_err)),
-#         "P_error_max":  float(jnp.max(P_err)),
-#     }
-
-import jax
-import jax.numpy as jnp
 
 def evaluate_multiple_observers(
     model,
@@ -798,7 +725,12 @@ def evaluate_multiple_observers(
         I_rot = compute_I_rot(F_rot)   # (obs, N, dimI)
 
         # Apply model to each observer batch
-        W_rot, P_rot = jax.vmap(lambda F,I: model((F,I)))(F_rot, I_rot)
+        # 1) apply model sample-wise
+        apply_model = jax.vmap(lambda F, I: model((F, I)))
+
+        # 2) apply over observers
+        W_rot, P_rot = jax.vmap(apply_model)(F_rot, I_rot)
+
 
 
     # -----------------------------------------
@@ -822,3 +754,54 @@ def evaluate_multiple_observers(
         "P_error_max":  float(jnp.max(P_err)),
     }
 
+def augment_WF_data(F, W, P, num_observers, key=jax.random.PRNGKey(0)):
+    """
+    Data augmentation for WF model according to Task 5.4.
+
+    Inputs:
+        F : (N, 3, 3)
+        W : (N,)
+        P : (N, 3, 3)
+        num_observers : int, number of random rotation matrices Q
+        key : PRNG key
+
+    Returns:
+        F_aug : ((1 + num_obs)*N, 3, 3)
+        W_aug : ((1 + num_obs)*N,)
+        P_aug : ((1 + num_obs)*N, 3, 3)
+    """
+
+    N = F.shape[0]
+
+    # -------------------------------
+    # 1. Sample rotation matrices
+    # -------------------------------
+    keys = jax.random.split(key, num_observers)
+    Q = jax.vmap(random_rotation)(keys)      # (obs, 3, 3)
+
+    # -------------------------------
+    # 2. Rotate F and P
+    # -------------------------------
+    # Rotate F:  F_rot[o, n] = Q[o] @ F[n]
+    F_rot = jax.vmap(lambda q: q @ F)(Q)      # (obs, N, 3, 3)
+
+    # Rotate P:  P_rot[o, n] = Q[o] @ P[n]
+    P_rot = jax.vmap(lambda q: q @ P)(Q)      # (obs, N, 3, 3)
+
+    # W is unchanged → Just repeat it obs times
+    W_rot = jnp.tile(W, (num_observers,))     # flatten to (obs*N,)
+
+    # -------------------------------
+    # 3. Flatten augmented tensors
+    # -------------------------------
+    F_rot = F_rot.reshape(-1, 3, 3)
+    P_rot = P_rot.reshape(-1, 3, 3)
+
+    # -------------------------------
+    # 4. Concatenate original + augmented
+    # -------------------------------
+    F_aug = jnp.concatenate([F, F_rot], axis=0)
+    W_aug = jnp.concatenate([W, W_rot], axis=0)
+    P_aug = jnp.concatenate([P, P_rot], axis=0)
+
+    return F_aug, W_aug, P_aug
