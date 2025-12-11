@@ -191,7 +191,7 @@ def compute_I11(F, G_cub):
 
     return I11
 
-
+# for transversly isotropic model
 def compute_all_invariants(F, G_ti):
     """
     Computes all invariants (I1, J, I4, I5) simultaneously.
