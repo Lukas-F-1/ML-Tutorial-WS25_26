@@ -70,71 +70,126 @@ def plot_load_path_space(datasets_dict, title="Load Path Map: Interpolation Chec
     plt.tight_layout()
     plt.show()
 
-def plot_deformation_state_space(datasets_dict,components=["F11", "F22", "F33", "F12"], title="State Space: Shear vs. Stretch Intensity"):
+def plot_deformation_state_space(datasets_dict, components=None, title="State Space: Shear vs. Stretch Intensity"):
     """
-    Visualizes the distribution of specific F-components using Boxplots.
-    Perfect for proving interpolation vs. extrapolation component-by-component.
+    Visualizes the distribution of F-components using Boxplots in a 3x3 grid
+    matching the tensor structure of F.
     
     Args:
         datasets_dict: Dictionary with data.
         components: List of strings determining which tensor components to plot.
-                    e.g. ["F11", "F12", "F22"] -> indices (0,0), (0,1), (1,1)
+                    If None, all 9 components are plotted.
     """
-    # 1. Prepare Data for Seaborn (DataFrame format)
-    records = []
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
     
-    # Mapping string "F12" -> indices (0,1)
+    # Default: alle 9 Komponenten
+    if components is None:
+        components = ["F11", "F12", "F13", "F21", "F22", "F23", "F31", "F32", "F33"]
+    
+    # Mapping string "F12" -> indices (row, col) im Grid und im Tensor
     comp_map = {
-        "F11": (0,0), "F12": (0,1), "F13": (0,2),
-        "F21": (1,0), "F22": (1,1), "F23": (1,2),
-        "F31": (2,0), "F32": (2,1), "F33": (2,2)
+        "F11": (0, 0), "F12": (0, 1), "F13": (0, 2),
+        "F21": (1, 0), "F22": (1, 1), "F23": (1, 2),
+        "F31": (2, 0), "F32": (2, 1), "F33": (2, 2)
     }
+    
+    # Kurzbezeichnungen und Farben für die Loadpaths
+    label_abbrev = {
+        "Train: Uniaxial": "Uni",
+        "Train: Pure Shear": "PS",
+        "Train: Biaxial": "Bi",
+        "Test: Biaxial": "Bi*",
+        "Test: Mixed": "Mix*"
+    }
+    
+    # Farbpalette (konsistent für alle Plots)
+    palette = sns.color_palette("tab10", n_colors=len(datasets_dict))
+    color_map = {label: palette[i] for i, label in enumerate(datasets_dict.keys())}
+    
+    # 1. Daten vorbereiten und globale Y-Grenzen bestimmen
+    records = {comp: [] for comp in comp_map.keys()}
+    global_min, global_max = float('inf'), float('-inf')
     
     for label, data in datasets_dict.items():
         F = data[0] if isinstance(data, (tuple, list)) else data
-        
-        # Categorize: Train vs Test for coloring
         category = "Test" if "Test" in label else "Train"
+        abbrev = label_abbrev.get(label, label[:3])
         
-        for comp_name in components:
-            if comp_name not in comp_map: continue
-            
-            i, j = comp_map[comp_name]
+        # Globale Min/Max tracken
+        global_min = min(global_min, F.min())
+        global_max = max(global_max, F.max())
+        
+        for comp_name, (i, j) in comp_map.items():
             values = F[:, i, j]
-            
-            # Add each point to records
             for val in values:
-                records.append({
+                records[comp_name].append({
                     "Dataset": label,
+                    "Abbrev": abbrev,
                     "Type": category,
-                    "Component": comp_name,
                     "Value": float(val)
                 })
-
-    df = pd.DataFrame(records)
-
-    # 2. Plotting
-    plt.figure(figsize=(14, 6))
     
-    # We use a boxplot to show the range
-    # Hue separates datasets, X separates components
-    sns.boxplot(data=df, x="Component", y="Value", hue="Dataset", 
-                palette="tab10", gap=.1, whis=1.5)
+    # Etwas Padding für die Y-Achse
+    y_padding = (global_max - global_min) * 0.05
+    y_limits = (global_min - y_padding, global_max + y_padding)
     
-    # Optional: Add Strip plot (dots) for Test data to see exact distribution
-    # This shows exactly where the test points lie relative to the train boxes
-    test_df = df[df["Type"] == "Test"]
-    if not test_df.empty:
-        sns.stripplot(data=test_df, x="Component", y="Value", hue="Dataset", 
-                      dodge=True, jitter=True, color="black", alpha=0.3, legend=False)
-
-    plt.title(title, fontsize=16)
-    plt.grid(True, linestyle=':', alpha=0.6, axis='y')
+    # 2. 3x3 Grid erstellen
+    fig, axes = plt.subplots(3, 3, figsize=(12, 10))
     
-    # Move legend outside
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+    for comp_name, (row, col) in comp_map.items():
+        ax = axes[row, col]
+        
+        # DataFrame für diese Komponente
+        df_comp = pd.DataFrame(records[comp_name])
+        
+        if comp_name in components and not df_comp.empty:
+            # Boxplot mit Kurzbezeichnungen
+            sns.boxplot(data=df_comp, x="Abbrev", y="Value", hue="Dataset",
+                       palette=color_map, ax=ax, width=0.7, dodge=False,
+                       legend=False)
+            
+            # Test-Punkte als Overlay
+            test_df = df_comp[df_comp["Type"] == "Test"]
+            if not test_df.empty:
+                sns.stripplot(data=test_df, x="Abbrev", y="Value",
+                            color="black", alpha=0.3, ax=ax, size=2)
+            
+            ax.set_title(f"$F_{{{row+1}{col+1}}}$", fontsize=14, fontweight='bold')
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.set_ylim(y_limits)  # Einheitliche Y-Skala
+            
+            # X-Achsen Labels nur in der untersten Reihe
+            if row < 2:
+                ax.set_xticklabels([])
+            else:
+                ax.tick_params(axis='x', labelsize=10)
+                
+        else:
+            ax.set_visible(False)
+        
+        ax.grid(True, linestyle=':', alpha=0.6, axis='y')
     
-    plt.tight_layout()
+    # 3. Gemeinsame Legende erstellen
+    legend_patches = [mpatches.Patch(color=color_map[label], 
+                                      label=f"{label_abbrev.get(label, label)} = {label}")
+                     for label in datasets_dict.keys()]
+    
+    fig.legend(handles=legend_patches, 
+              loc='lower center', 
+              ncol=3,
+              fontsize=11,
+              framealpha=0.9,
+              bbox_to_anchor=(0.5, -0.02))
+    
+    # Gemeinsame Y-Achsenbeschriftung
+    fig.text(0.02, 0.5, 'Value', va='center', rotation='vertical', fontsize=12)
+    
+    plt.suptitle(title, fontsize=16, fontweight='bold')
+    plt.tight_layout(rect=[0.04, 0.08, 1, 0.96])
     plt.show()
 
 def visualize_deformation_3d(F, step_index=0):
@@ -294,6 +349,80 @@ def plot_F_diagonals(F, time=None, components=["F11", "F22", "F33"], title="Diag
     plt.show()
 
     return fig, ax
+
+def plot_generalization_heatmap(results_df, title="Model Generalization: Test Error Heatmap"):
+    """
+    Plots a vertically split heatmap comparing two models across different
+    training set sizes and multiple runs.
+    
+    Args:
+        results_df: DataFrame with columns:
+            - 'Model': str ('Naive FFNN' or 'PANN')
+            - 'N_Train_Paths': int (number of training loadpaths)
+            - 'Run': int (run index 0-4)
+            - 'Test_Error': float (RMSE or similar metric)
+        title: str, plot title
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    
+    # Pivot für beide Modelle
+    models = ['Naive FFNN', 'PANN']
+    n_paths_list = sorted(results_df['N_Train_Paths'].unique())
+    n_runs = results_df['Run'].nunique()
+    
+    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    
+    # Gemeinsame Farbskala bestimmen (log-scale friendly)
+    vmin = results_df['Test_Error'].min()
+    vmax = results_df['Test_Error'].max()
+    
+    for ax, model_name in zip(axes, models):
+        # Daten für dieses Modell filtern und pivotieren
+        model_df = results_df[results_df['Model'] == model_name]
+        pivot = model_df.pivot(index='Run', columns='N_Train_Paths', values='Test_Error')
+        
+        # Sicherstellen dass Spalten sortiert sind
+        pivot = pivot.reindex(columns=n_paths_list)
+        
+        # Heatmap
+        im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn_r',
+                       vmin=vmin, vmax=vmax)
+        
+        # Werte in Zellen schreiben
+        for i in range(pivot.shape[0]):
+            for j in range(pivot.shape[1]):
+                val = pivot.values[i, j]
+                if not np.isnan(val):
+                    # Textfarbe basierend auf Hintergrund
+                    text_color = 'white' if val > (vmax + vmin) / 2 else 'black'
+                    ax.text(j, i, f'{val:.3f}', ha='center', va='center',
+                           fontsize=9, color=text_color, fontweight='bold')
+        
+        # Y-Achse: Runs
+        ax.set_yticks(range(n_runs))
+        ax.set_yticklabels([f'Run {r+1}' for r in range(n_runs)])
+        ax.set_ylabel(model_name, fontsize=12, fontweight='bold')
+        
+        # Trennlinie-Effekt durch Rahmen
+        for spine in ax.spines.values():
+            spine.set_linewidth(2)
+    
+    # X-Achse nur unten
+    axes[1].set_xticks(range(len(n_paths_list)))
+    axes[1].set_xticklabels([str(n) for n in n_paths_list])
+    axes[1].set_xlabel('Number of Training Loadpaths', fontsize=12)
+    
+    # Colorbar
+    cbar = fig.colorbar(im, ax=axes, shrink=0.8, pad=0.02)
+    cbar.set_label('Test Error (RMSE)', fontsize=11)
+    
+    plt.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
 
 def plot_model_and_history(model, X_cal, Y_cal, history, *,
                            title_model="Model Prediction",

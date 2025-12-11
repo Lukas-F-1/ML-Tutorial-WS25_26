@@ -827,3 +827,146 @@ def augment_WF_data(F, W, P, num_observers, key=jax.random.PRNGKey(0)):
     P_aug = jnp.concatenate([P, P_rot], axis=0)
 
     return F_aug, W_aug, P_aug
+
+def _run_single_training(args):
+    """
+    Runs ONE training (either FFNN or PANN) and returns the result dict.
+    Designed to be called in parallel.
+    """
+    # Imports innerhalb der Funktion für joblib multiprocessing
+    import jax
+    import jax.numpy as jnp
+    import jax.random as jrandom
+    import klax
+    from . import models as tm
+    from . import losses as tl
+    
+    (model_type, n_train, run_idx, 
+     all_C, all_I, all_F, all_W, all_P, inv_weights, G_ti,
+     steps, num_hidden_layers, nodes_per_layer, batch_size, learning_rate) = args
+    
+    num_paths = len(all_C)
+    test_size = 1.0 - (n_train / num_paths)
+    test_size = max(0.1, min(0.9, test_size))
+    
+    # Deterministische Keys basierend auf run_idx und n_train
+    # Gleicher split_key für FFNN und PANN (fairer Vergleich)
+    base_seed = run_idx * 10000 + n_train * 100
+    split_key = jrandom.PRNGKey(base_seed)
+    model_key = jrandom.PRNGKey(base_seed + (1 if model_type == 'FFNN' else 2))
+    train_key = jrandom.PRNGKey(base_seed + (3 if model_type == 'FFNN' else 4))
+    
+    try:
+        if model_type == 'FFNN':
+            # Data Split
+            train_data, test_data, _, _ = prepare_FFNN_split(
+                all_C, all_P, inv_weights, test_size=test_size, key=split_key
+            )
+            X_test, Y_test = test_data
+            
+            # Build & Train
+            model = tm.build(
+                key=model_key, input_dim=6, output_dim=9,
+                num_hidden_layers=num_hidden_layers,
+                nodes_per_layer=nodes_per_layer,
+                activations=jax.nn.softplus,
+                constrain_icnn_weights=False
+            )
+            trained, _ = tm.train_model(
+                model, train_data, train_key,
+                steps=steps, batch_size=batch_size, 
+                learning_rate=learning_rate,
+                loss_fn=tl.WeightedMSE()
+            )
+            
+            # Evaluate
+            P_pred = jax.vmap(trained)(X_test)
+            error = float(jnp.sqrt(jnp.mean((P_pred - Y_test)**2)))
+            
+        else:  # PANN
+            # Data Split
+            train_data, test_data, _, _ = prepare_PANN_split(
+                all_F, all_I, all_W, all_P, inv_weights,
+                test_size=test_size, key=split_key
+            )
+            (F_test, I_test), (W_test, P_test) = test_data
+            
+            # Build & Train
+            model = tm.SobolevModel_WI(
+                G_ti=G_ti, key=model_key, input_dim=5,
+                output_dim="scalar",
+                num_hidden_layers=num_hidden_layers,
+                nodes_per_layer=nodes_per_layer,
+                activation=jax.nn.softplus,
+                is_icnn=False, is_ficnn=True
+            )
+            trained, _ = tm.train_WI(
+                model, train_data, train_key,
+                steps=steps, batch_size=batch_size,
+                learning_rate=learning_rate,
+                loss_fn=tl.WeightedSobolevLoss(alpha=1.0, beta=1.0)
+            )
+            trained_final = klax.finalize(trained)
+            
+            # Evaluate
+            preds = jax.vmap(trained_final)((F_test, I_test))
+            _, P_pred = preds
+            
+            if P_pred.ndim == 3:
+                P_pred = P_pred.reshape(-1, 9)
+            if P_test.ndim == 3:
+                P_test = P_test.reshape(-1, 9)
+                
+            error = float(jnp.sqrt(jnp.mean((P_pred - P_test)**2)))
+            
+    except Exception as e:
+        print(f"Error in {model_type} n={n_train} run={run_idx}: {e}")
+        error = float('nan')
+    
+    return {
+        'Model': 'Naive FFNN' if model_type == 'FFNN' else 'PANN',
+        'N_Train_Paths': n_train,
+        'Run': run_idx,
+        'Test_Error': error
+    }
+
+def run_generalization_experiment_parallel(
+    all_C, all_I, all_F, all_W, all_P, inv_weights, G_ti,
+    n_paths_list, n_runs, steps, num_hidden_layers, nodes_per_layer,
+    batch_size=32, learning_rate=1e-3, n_jobs=-1
+):
+    """
+    Parallel version of the generalization experiment using joblib.
+    """
+    from joblib import Parallel, delayed
+    import pandas as pd
+    
+    experiments = []
+    for run_idx in range(n_runs):
+        for n_train in n_paths_list:
+            for model_type in ['FFNN', 'PANN']:
+                experiments.append((
+                    model_type, n_train, run_idx,
+                    all_C, all_I, all_F, all_W, all_P, inv_weights, G_ti,
+                    steps, num_hidden_layers, nodes_per_layer, batch_size, learning_rate
+                ))
+    
+    total = len(experiments)
+    print(f"Running {total} experiments in parallel (n_jobs={n_jobs})...")
+    print(f"Config: {len(n_paths_list)} sizes × {n_runs} runs × 2 models")
+    print("-" * 50)
+    
+    # verbose=total zeigt "[X/total]" Format
+    results = Parallel(
+        n_jobs=n_jobs, 
+        verbose=total,  # Zeigt Fortschritt als [done/total]
+        backend='loky',
+        max_nbytes='50M'  # Reduziert Memory-Transfers
+    )(
+        delayed(_run_single_training)(exp) for exp in experiments
+    )
+    
+    print("-" * 50)
+    print(f"Completed {len(results)} experiments")
+    
+    return pd.DataFrame(results)
