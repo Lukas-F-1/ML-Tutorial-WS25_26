@@ -70,7 +70,7 @@ def plot_load_path_space(datasets_dict, title="Load Path Map: Interpolation Chec
     plt.tight_layout()
     plt.show()
 
-def plot_deformation_state_space(datasets_dict, title="State Space: Shear vs. Stretch Intensity"):
+def plot_deformation_state_space(datasets_dict,components=["F11", "F22", "F33", "F12"], title="State Space: Shear vs. Stretch Intensity"):
     """
     Visualizes the distribution of specific F-components using Boxplots.
     Perfect for proving interpolation vs. extrapolation component-by-component.
