@@ -958,3 +958,45 @@ def plot_stress_stretch_comparison(pred_dict, F_true, P_true, component_indices=
     )
 
     fig.show()
+
+def plt_growth_cond(results, model_name="Model"):
+    """
+    Plot growth condition evaluation results.
+    
+    Parameters:
+        results     : list of tuples (F, W) where 
+                        F is a (3,3) deformation gradient
+                        W is the predicted energy scalar
+        model_name  : name of the model (for the plot title)
+    """
+    
+    # Extract Frobenius norms and energies
+    F_norms = []
+    W_vals = []
+    
+    for F, W in results:
+        frob = jnp.linalg.norm(F)          # Frobenius norm
+        F_norms.append(float(frob))
+        W_vals.append(float(W))
+    
+    # Convert to arrays for consistent plotting
+    F_norms = jnp.array(F_norms)
+    W_vals = jnp.array(W_vals)
+    
+    # Sort by X for smooth-looking curves
+    idx = jnp.argsort(F_norms)
+    F_norms = F_norms[idx]
+    W_vals = W_vals[idx]
+    
+    # Create plot
+    plt.figure(figsize=(7,5))
+    plt.plot(F_norms, W_vals, "o-", markersize=4, label=model_name)
+    
+    plt.xlabel(r"$\|F\|_F$ (Frobenius norm of deformation gradient)")
+    plt.ylabel(r"$W(F)$ (Predicted Energy)")
+    plt.title(f"Growth Condition Evaluation - {model_name}")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
