@@ -499,22 +499,26 @@ def C_to_six(C):
 
 def prepare_PANN_split(
     all_F, all_I, all_W, all_P,
+    inv_path_weights,
     test_size=0.3,
     key=jax.random.PRNGKey(0)
 ):
     """
-    Prepares a train/test split for the physics-augmented ICNN (W^I model).
+    Prepares a train/test split for the physics-augmented ICNN (W^I model),
+    including per-sample path weights for the training set.
 
     Inputs:
-        all_F: list of deformation gradients per path (100 × (50,3,3))
-        all_I: list of invariants per path (100 × (50,5))
-        all_W: list of energies per path (100 × (50,))
-        all_P: list of stresses per path (100 × (50,3,3))
-        test_size: fraction of paths to assign to the test set
-        key: PRNGKey for reproducible random split
+        all_F          : list of deformation gradients per path (num_paths × (T_i,3,3))
+        all_I          : list of invariants per path         (num_paths × (T_i,dim_I))
+        all_W          : list of energies per path           (num_paths × (T_i,))
+        all_P          : list of stresses per path           (num_paths × (T_i,3,3))
+        inv_path_weights : jnp.ndarray of shape (num_paths,)
+                           inverse path weights 1 / w_path
+        test_size      : fraction of paths to assign to the test set
+        key            : PRNGKey for reproducible random split
 
     Returns:
-        train_data = ((F_train, I_train), (W_train, P_train))
+        train_data = ((F_train, I_train), ((W_train, P_train), sample_weights_train))
         test_data  = ((F_test,  I_test),  (W_test,  P_test))
         train_idx, test_idx  (path indices used)
     """
@@ -538,11 +542,29 @@ def prepare_PANN_split(
     W_test  = jnp.concatenate([all_W[int(i)] for i in test_idx], axis=0)
     P_test  = jnp.concatenate([all_P[int(i)] for i in test_idx], axis=0)
 
-    # --- 3) Package datasets in the ICNN format ---
-    train_data = ((F_train, I_train), (W_train, P_train))
+    # --- 3) Build per-sample weights for the TRAIN set ---
+    sample_weights_train = jnp.concatenate(
+        [
+            jnp.ones(all_W[int(i)].shape[0]) * inv_path_weights[int(i)]
+            for i in train_idx
+        ],
+        axis=0
+    )
+    # Ensure 1D shape (N_train,)
+    sample_weights_train = sample_weights_train.reshape(-1)
+
+    # --- 4) Package datasets in the ICNN format ---
+    # Train data: includes weights
+    train_data = (
+        (F_train, I_train),
+        ((W_train, P_train), sample_weights_train)
+    )
+
+    # Test data: unchanged, no weights
     test_data  = ((F_test,  I_test),  (W_test,  P_test))
 
     return train_data, test_data, train_idx, test_idx
+
 
 
 def load_multiscale_paths(path):
