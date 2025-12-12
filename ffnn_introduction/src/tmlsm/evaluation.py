@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from . import data_t2 as td2
 import matplotlib.pyplot as plt
+import numpy as np
 
 def evaluate_growth_condition(model, model_type: str, n: int = 100, eps_max: float = 1e-2):
     """
@@ -745,20 +746,41 @@ def error_vs_magnitude_P(
     plt.show()
 
 #multiple model comparison with 3x3 error in P components through boxplots
+def _to_stacked_preds(P_pred):
+    """
+    Normalize P_pred into shape (K, N, 3, 3).
+    Accepts:
+      - (N,3,3)
+      - (K,N,3,3)
+      - list/tuple of (N,3,3)
+    """
+    if isinstance(P_pred, (list, tuple)):
+        arr = np.stack([np.array(x) for x in P_pred], axis=0)  # (K,N,3,3)
+    else:
+        arr = np.array(P_pred)
+        if arr.ndim == 3 and arr.shape[-2:] == (3, 3):
+            arr = arr[None, ...]  # (1,N,3,3)
+        elif arr.ndim == 4 and arr.shape[-2:] == (3, 3):
+            pass  # already (K,N,3,3)
+        else:
+            raise ValueError(f"Unsupported prediction shape: {arr.shape}")
+    return arr
+
+
 def component_error_distribution_grid(
     P_true,
     P_pred_dict: dict,
     title: str = "Per-component error distributions (boxplots)",
+    init_reduce: str = "mean",   # currently supports "mean" (future: median, etc.)
 ):
     """
     3x3 grid; each subplot is one P_ij component.
     In each subplot: boxplots of per-sample errors for each model.
 
-    Parameters
-    ----------
-    P_true : (N,3,3)
-    P_pred_dict : dict[str, (N,3,3)]
-        Mapping model_name -> P_pred array.
+    Supports multiple initializations per model:
+      - P_pred_dict[name] can be (N,3,3) OR (K,N,3,3) OR list of (N,3,3).
+    The function reduces init dimension by averaging predictions across inits
+    (so errors reflect the averaged model response).
     """
     P_true = np.array(P_true)
 
@@ -776,16 +798,20 @@ def component_error_distribution_grid(
         for j in range(3):
             ax = axes[i, j]
             data = []
+
             for name in model_names:
-                P_pred = np.array(P_pred_dict[name])
-                e = (P_pred - P_true)[:, i, j]
+                preds = _to_stacked_preds(P_pred_dict[name])  # (K,N,3,3)
+
+                if init_reduce == "mean":
+                    P_pred_red = preds.mean(axis=0)           # (N,3,3)
+                else:
+                    raise ValueError(f"Unknown init_reduce='{init_reduce}'")
+
+                e = (P_pred_red - P_true)[:, i, j]            # (N,)
                 data.append(e)
 
-            # Boxplot for each model
             bp = ax.boxplot(data, patch_artist=True)
-
-            # Color & labels
-            for patch, k in zip(bp["boxes"], range(num_models)):
+            for patch in bp["boxes"]:
                 patch.set_alpha(0.6)
 
             ax.set_xticks(range(1, num_models + 1))
@@ -796,55 +822,157 @@ def component_error_distribution_grid(
     plt.tight_layout()
     plt.show()
 
+
 def component_rmse_barplot(
     P_true,
     P_pred_dict: dict,
     title: str = "Per-component RMSE of P",
+    init_reduce: str = "mean",
 ):
     """
     Grouped bar plot: RMSE per component for each model.
 
-    Parameters
-    ----------
-    P_true : (N,3,3)
-    P_pred_dict : dict[str, (N,3,3)]
-        Mapping model_name -> P_pred array.
+    Supports multiple initializations per model:
+      - P_pred_dict[name] can be (N,3,3) OR (K,N,3,3) OR list of (N,3,3).
+    Reduces init dimension by averaging predictions across inits first
+    (so RMSE is computed on the averaged prediction).
     """
     P_true = np.array(P_true)
     model_names = list(P_pred_dict.keys())
     num_models = len(model_names)
 
-    # Compute RMSE per component per model
-    rmse = {}  # name -> (9,) RMSEs in row-major order
+    rmse = {}  # name -> (9,)
     for name in model_names:
-        P_pred = np.array(P_pred_dict[name])
-        e = P_pred - P_true  # (N,3,3)
-        # (3,3) of RMSEs
-        rmse_mat = np.sqrt(np.mean(e**2, axis=0))
-        rmse[name] = rmse_mat.reshape(-1)  # (9,)
+        preds = _to_stacked_preds(P_pred_dict[name])  # (K,N,3,3)
+
+        if init_reduce == "mean":
+            P_pred_red = preds.mean(axis=0)          # (N,3,3)
+        else:
+            raise ValueError(f"Unknown init_reduce='{init_reduce}'")
+
+        e = P_pred_red - P_true                      # (N,3,3)
+        rmse_mat = np.sqrt(np.mean(e**2, axis=0))    # (3,3)
+        rmse[name] = rmse_mat.reshape(-1)            # (9,)
 
     comp_labels_flat = ["11", "12", "13",
                         "21", "22", "23",
                         "31", "32", "33"]
 
-    x = np.arange(9)  # components
+    x = np.arange(9)
     width = 0.8 / num_models
 
     plt.figure(figsize=(12, 5))
     for idx, name in enumerate(model_names):
         offset = (idx - (num_models - 1) / 2) * width
-        plt.bar(
-            x + offset,
-            rmse[name],
-            width=width,
-            label=name,
-            alpha=0.8,
-        )
+        plt.bar(x + offset, rmse[name], width=width, label=name, alpha=0.8)
 
     plt.xticks(x, [f"P{c}" for c in comp_labels_flat])
     plt.ylabel("RMSE")
     plt.title(title)
     plt.grid(True, axis="y", linestyle="--", alpha=0.5)
     plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def _stack_preds(preds):
+    """
+    Normalize predictions to shape (K, N, ...)
+
+    Accepts:
+      - array (N, ...)
+      - array (K, N, ...)
+      - list of arrays [(N, ...), ...]
+
+    Returns:
+      array (K, N, ...)
+    """
+    if isinstance(preds, (list, tuple)):
+        arr = np.stack([np.array(p) for p in preds], axis=0)
+    else:
+        arr = np.array(preds)
+        if arr.ndim >= 1:
+            arr = arr[None, ...]
+        else:
+            raise ValueError(f"Unsupported prediction shape: {arr.shape}")
+    return arr
+
+def rmse_energy_and_stress_barplots(
+    W_true,
+    P_true,
+    W_pred_dict: dict,
+    P_pred_dict: dict,
+    *,
+    title_energy: str = "Energy RMSE",
+    title_stress: str = "Stress RMSE",
+):
+    """
+    Compute and plot RMSE for energy (W) and stress (P).
+
+    Parameters
+    ----------
+    W_true : (N,) or (N,1)
+        Ground-truth energy.
+    P_true : (N,3,3)
+        Ground-truth stress.
+    W_pred_dict : dict[str, preds]
+        preds can be:
+          - (N,) or (N,1)
+          - (K,N) or (K,N,1)
+          - list of (N,) arrays
+    P_pred_dict : dict[str, preds]
+        preds can be:
+          - (N,3,3)
+          - (K,N,3,3)
+          - list of (N,3,3) arrays
+    """
+
+    W_true = np.squeeze(np.array(W_true))        # (N,)
+    P_true = np.array(P_true)                    # (N,3,3)
+
+    model_names = list(W_pred_dict.keys())
+
+    rmse_W = {}
+    rmse_P = {}
+
+    for name in model_names:
+        # -----------------
+        # Energy RMSE
+        # -----------------
+        W_preds = _stack_preds(W_pred_dict[name])   # (K,N) or (K,N,1)
+        W_preds = np.squeeze(W_preds)                # (K,N)
+        W_mean = W_preds.mean(axis=0)                # (N,)
+
+        rmse_W[name] = np.sqrt(np.mean((W_mean - W_true) ** 2))
+
+        # -----------------
+        # Stress RMSE
+        # -----------------
+        P_preds = _stack_preds(P_pred_dict[name])    # (K,N,3,3)
+        P_mean = P_preds.mean(axis=0)                # (N,3,3)
+
+        err = P_mean - P_true
+        rmse_P[name] = np.sqrt(np.mean(err ** 2))    # scalar over all comps
+
+    # -----------------
+    # Plot: Energy RMSE
+    # -----------------
+    plt.figure(figsize=(6, 4))
+    plt.bar(rmse_W.keys(), rmse_W.values(), alpha=0.8)
+    plt.ylabel("RMSE (Energy W)")
+    plt.title(title_energy)
+    plt.yscale("log") 
+    plt.grid(True, axis="y", linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+
+    # -----------------
+    # Plot: Stress RMSE
+    # -----------------
+    plt.figure(figsize=(6, 4))
+    plt.bar(rmse_P.keys(), rmse_P.values(), alpha=0.8)
+    plt.ylabel("RMSE (Stress P)")
+    plt.yscale("log") 
+    plt.title(title_stress)
+    plt.grid(True, axis="y", linestyle="--", alpha=0.5)
     plt.tight_layout()
     plt.show()
