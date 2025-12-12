@@ -236,7 +236,7 @@ def prepare_dataset_3(
     }
 
 
-#------------------------Workflows
+#------------------------Workflows Model Training
 
 def workflow_task_2_2_train_ms_sweep(
     dataset_1: dict,
@@ -1524,3 +1524,138 @@ def workflow_task_5_4_train_wf_augmented(
             results.append(meta)
 
     return results
+
+
+#------------------------Workflows Model Evaluation
+
+def get_test_data_for_model_id(
+    model_id: str,
+    *,
+    dataset_1: dict | None = None,
+    dataset_3: dict | None = None,
+    include_identity: bool = True,
+):
+    """
+    Return the correct test dataset(s) in the correct format for a given model_id.
+
+    Parameters
+    ----------
+    model_id:
+        One of: "MS", "MSW", "WITI", "WICUB", "WF", "WF_AUG"
+        (based on your current workflows.py)
+
+    dataset_1:
+        Output of prepare_dataset_1(). Required for Dataset 1 models:
+          - MS, MSW, WITI
+
+    dataset_3:
+        Output of prepare_dataset_3(). Required for Dataset 3 models:
+          - WICUB, WF, WF_AUG
+
+    include_identity:
+        If True and model_id supports it, include an identity test case.
+
+    Returns
+    -------
+    dict[str, tuple]:
+        A dictionary mapping test-set name -> test_data tuple in the expected format.
+
+        Formats:
+          - MS / MSW:
+              test_data = (X_test, Y_test)  where
+                X_test: (N,6)  = C_to_six(C(F))
+                Y_test: (N,9)  = vec(P)
+
+          - WITI:
+              test_data = ((F_test, I_test), (W_test, P_test))
+              (no weights in test)
+
+          - WICUB:
+              test_data = ((F_test, I_test), (W_test, P_test))
+              (already prepared by prepare_dataset_3)
+
+          - WF / WF_AUG:
+              test_data = (F_test, (W_test, P_test))
+              (model input is F only)
+    """
+    model_id = model_id.upper()
+
+    out = {}
+
+    # ----------------------------
+    # Dataset 1 models
+    # ----------------------------
+    if model_id in ("MS", "MSW", "WITI"):
+        if dataset_1 is None:
+            raise ValueError(f"model_id='{model_id}' requires dataset_1=prepare_dataset_1(...)")
+
+    # MS / MSW: C->six as input, P reshaped to (N,9)
+    if model_id in ("MS", "MSW"):
+        # biax_test
+        X_bi_test = jax.vmap(td2.C_to_six)(dataset_1["C_bi_test"])
+        Y_bi_test = dataset_1["P_bi_test"].reshape(dataset_1["P_bi_test"].shape[0], 9)
+        out["biax_test"] = (X_bi_test, Y_bi_test)
+
+        # mixed_test
+        X_mix_test = jax.vmap(td2.C_to_six)(dataset_1["C_mix_test"])
+        Y_mix_test = dataset_1["P_mix_test"].reshape(dataset_1["P_mix_test"].shape[0], 9)
+        out["mixed_test"] = (X_mix_test, Y_mix_test)
+
+        return out
+
+    # WITI: invariant-based model, test format ((F,I),(W,P))
+    if model_id == "WITI":
+        # mixed_test (main task-3 test)
+        out["mixed_test"] = (
+            (dataset_1["F_mix_test"], dataset_1["I_mix_test"]),
+            (dataset_1["W_mix_test"], dataset_1["P_mix_test"])
+        )
+
+        # optional additional test set: biax_test
+        out["biax_test"] = (
+            (dataset_1["F_bi_test"], dataset_1["I_bi_test"]),
+            (dataset_1["W_bi_test"], dataset_1["P_bi_test"])
+        )
+
+        if include_identity:
+            G_ti = dataset_1["G_ti"]
+            F_I = jnp.eye(3)[None, :, :]          # (1,3,3)
+            I_I = td2.compute_all_invariants(F_I, G_ti)
+            # you may or may not have analytical references available; keep targets optional
+            out["identity_input_only"] = ((F_I, I_I), None)
+
+        return out
+
+    # ----------------------------
+    # Dataset 3 models
+    # ----------------------------
+    if model_id in ("WICUB", "WF", "WF_AUG"):
+        if dataset_3 is None:
+            raise ValueError(f"model_id='{model_id}' requires dataset_3=prepare_dataset_3(...)")
+
+    # WICUB: already packaged by prepare_dataset_3
+    if model_id == "WICUB":
+        out["dataset3_test"] = dataset_3["test_data_WI_cubic"]
+        if include_identity:
+            # cubic identity: build (F,I) input only
+            F_I = jnp.eye(3)[None, :, :]
+            # NOTE: prepare_dataset_3 does not store G_cub; caller should re-use same G_cub they used.
+            # If you want identity for cubic invariants, pass it externally or store G_cub in dataset_3.
+            out["identity_input_only_note"] = "To add identity for WICUB, store G_cub in dataset_3 or pass it in."
+        return out
+
+    # WF / WF_AUG: F-only input, test format (F,(W,P))
+    if model_id in ("WF", "WF_AUG"):
+        out["dataset3_test"] = (
+            dataset_3["F_test"],
+            (dataset_3["W_test"], dataset_3["P_test"])
+        )
+        if include_identity:
+            F_I = jnp.eye(3)[None, :, :]
+            out["identity_input_only"] = (F_I, None)
+        return out
+
+    raise ValueError(
+        f"Unknown model_id='{model_id}'. Expected one of: "
+        f"MS, MSW, WITI, WICUB, WF, WF_AUG"
+    )
