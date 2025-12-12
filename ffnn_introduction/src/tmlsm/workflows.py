@@ -115,6 +115,151 @@ def prepare_dataset_1(
 
     return data
 
+def prepare_dataset_4(
+    *,
+    base_path: str | Path | None = None,
+    G_ti: jnp.ndarray | None = None,
+):
+    """Prepare Dataset 4 (concentric sampled deformation gradients)."""
+    if G_ti is None:
+        G_ti = jnp.array([[4.0, 0.0, 0.0],
+                          [0.0, 0.5, 0.0],
+                          [0.0, 0.0, 0.5]])
+    
+    if base_path is None:
+        current_folder = Path(os.getcwd())
+        base_path = current_folder.parent / "hyperelasticity" / "data"
+    base_path = str(base_path)
+    
+    all_F = td2.load_all_concentric(base_path)
+    all_C, all_I, all_W, all_P, inv_weights = td2.preprocess_all_concentric(all_F, G_ti)
+    
+    return {
+        "base_path": base_path,
+        "G_ti": G_ti,
+        "all_F": all_F,
+        "all_C": all_C,
+        "all_I": all_I,
+        "all_W": all_W,
+        "all_P": all_P,
+        "inv_weights": inv_weights,
+    }
+
+def _run_single_task4(args):
+    """Single training for Task 4 with full persistence."""
+    import jax
+    import jax.numpy as jnp
+    import jax.random as jrandom
+    import klax
+    import equinox as eqx
+    import json
+    import pickle
+    from pathlib import Path
+    from . import models as tm
+    from . import losses as tl
+    from . import data_t2 as td2
+    
+    (model_type, n_train, run_idx,
+     all_C, all_I, all_F, all_W, all_P, inv_weights, G_ti,
+     steps, num_hidden_layers, nodes_per_layer, batch_size, learning_rate,
+     master_seed, out_dir) = args
+    
+    out_dir = Path(out_dir)
+    
+    num_paths = len(all_C)
+    test_size = max(0.1, min(0.9, 1.0 - (n_train / num_paths)))
+    
+    base_seed = master_seed + run_idx * 10000 + n_train * 100
+    split_key = jrandom.PRNGKey(base_seed)
+    model_key = jrandom.PRNGKey(base_seed + (1 if model_type == 'FFNN' else 2))
+    train_key = jrandom.PRNGKey(base_seed + (3 if model_type == 'FFNN' else 4))
+    
+    # File paths
+    tag = f"{model_type}_n{n_train:03d}_run{run_idx:02d}"
+    model_path = out_dir / f"{tag}.eqx"
+    history_path = out_dir / f"{tag}_history.pkl"
+    meta_path = out_dir / f"{tag}.json"
+    
+    try:
+        if model_type == 'FFNN':
+            train_data, test_data, train_idx, test_idx = td2.prepare_FFNN_split(
+                all_C, all_P, inv_weights, test_size=test_size, key=split_key)
+            X_test, Y_test = test_data
+            
+            model = tm.build(key=model_key, input_dim=6, output_dim=9,
+                           num_hidden_layers=num_hidden_layers,
+                           nodes_per_layer=nodes_per_layer,
+                           activations=jax.nn.softplus,
+                           constrain_icnn_weights=False)
+            trained, history = tm.train_model(model, train_data, train_key,
+                                             steps=steps, batch_size=batch_size,
+                                             learning_rate=learning_rate,
+                                             loss_fn=tl.WeightedMSE())
+            final_model = klax.finalize(trained)
+            
+            P_pred = jax.vmap(final_model)(X_test)
+            error = float(jnp.sqrt(jnp.mean((P_pred - Y_test)**2)))
+            
+        else:  # PANN
+            train_data, test_data, train_idx, test_idx = td2.prepare_PANN_split(
+                all_F, all_I, all_W, all_P, inv_weights,
+                test_size=test_size, key=split_key)
+            (F_test, I_test), (W_test, P_test) = test_data
+            
+            model = tm.SobolevModel_WI(G_ti=G_ti, key=model_key, input_dim=5,
+                                       output_dim="scalar",
+                                       num_hidden_layers=num_hidden_layers,
+                                       nodes_per_layer=nodes_per_layer,
+                                       activation=jax.nn.softplus,
+                                       is_icnn=False, is_ficnn=True)
+            trained, history = tm.train_WI(model, train_data, train_key,
+                                          steps=steps, batch_size=batch_size,
+                                          learning_rate=learning_rate,
+                                          loss_fn=tl.WeightedSobolevLoss(alpha=1.0, beta=1.0))
+            final_model = klax.finalize(trained)
+            
+            preds = jax.vmap(final_model)((F_test, I_test))
+            _, P_pred = preds
+            if P_pred.ndim == 3: P_pred = P_pred.reshape(-1, 9)
+            if P_test.ndim == 3: P_test = P_test.reshape(-1, 9)
+            error = float(jnp.sqrt(jnp.mean((P_pred - P_test)**2)))
+        
+        # Save model
+        eqx.tree_serialise_leaves(str(model_path), final_model)
+        
+        # Save history
+        with open(history_path, "wb") as f:
+            pickle.dump(history, f)
+        
+        # Save meta
+        meta = {
+            "task": "4",
+            "model_type": model_type,
+            "model_name": "Naive FFNN" if model_type == "FFNN" else "PANN",
+            "n_train": n_train,
+            "run_idx": run_idx,
+            "test_error": error,
+            "steps": steps,
+            "num_hidden_layers": num_hidden_layers,
+            "nodes_per_layer": nodes_per_layer,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "test_size": test_size,
+            "base_seed": base_seed,
+            "train_idx": [int(i) for i in train_idx],
+            "test_idx": [int(i) for i in test_idx],
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(history_path),
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+            
+    except Exception as e:
+        print(f"Error: {model_type} n={n_train} run={run_idx}: {e}")
+        error = float('nan')
+    
+    return {'Model': 'Naive FFNN' if model_type == 'FFNN' else 'PANN',
+            'N_Train_Paths': n_train, 'Run': run_idx, 'Test_Error': error}
 
 #Workflows
 
@@ -568,3 +713,49 @@ def workflow_task_3_train_wi_ti_strategies_abc(
             results.append(meta)
 
     return results
+
+def workflow_task_4_generalization(
+    ds4: dict,
+    *,
+    out_dir: str | Path = "artifacts/task4",
+    n_paths_list: list[int] = [1, 2, 4, 8, 16, 32, 48, 64, 80],
+    n_runs: int = 5,
+    steps: int = 100_000,
+    num_hidden_layers: int = 3,
+    nodes_per_layer: int = 16,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    n_jobs: int = -2,
+    master_seed: int = 42,
+):
+    """Task 4: Generalization experiment FFNN vs PANN with full persistence."""
+    from joblib import Parallel, delayed
+    import pandas as pd
+    
+    out_dir = Path(out_dir)
+    _ensure_dir(out_dir)
+    
+    # Build experiments list
+    experiments = []
+    for run_idx in range(n_runs):
+        for n_train in n_paths_list:
+            for model_type in ['FFNN', 'PANN']:
+                experiments.append((
+                    model_type, n_train, run_idx,
+                    ds4["all_C"], ds4["all_I"], ds4["all_F"],
+                    ds4["all_W"], ds4["all_P"], ds4["inv_weights"], ds4["G_ti"],
+                    steps, num_hidden_layers, nodes_per_layer, batch_size, learning_rate,
+                    master_seed, str(out_dir)
+                ))
+    
+    total = len(experiments)
+    print(f"Task 4: {len(n_paths_list)} sizes × {n_runs} runs × 2 models = {total} trainings")
+    
+    results = Parallel(n_jobs=n_jobs, verbose=total, backend='loky')(
+        delayed(_run_single_task4)(exp) for exp in experiments
+    )
+    
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(out_dir / "results_summary.csv", index=False)
+    
+    return {"results_df": results_df, "out_dir": str(out_dir)}

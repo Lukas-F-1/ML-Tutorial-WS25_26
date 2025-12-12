@@ -1,0 +1,20 @@
+{
+  "model_id": "MS",
+  "tag": "MS_small_l2_n8_steps500000",
+  "arch_name": "small",
+  "num_hidden_layers": 2,
+  "nodes_per_layer": 8,
+  "steps": 500000,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "activation": "softplus",
+  "train_dataset": "Dataset 1 calibration (uni + pure_shear + biax)",
+  "test_sets": [
+    "biax_test",
+    "mixed_test"
+  ],
+  "rmse_biax_test": 1.073286771774292,
+  "rmse_mixed_test": 9.954192161560059,
+  "saved_model_path": "artifacts\\task2_2\\MS_small_l2_n8_steps500000.eqx",
+  "saved_history_path": "artifacts\\task2_2\\MS_small_l2_n8_steps500000_history.pkl"
+}
