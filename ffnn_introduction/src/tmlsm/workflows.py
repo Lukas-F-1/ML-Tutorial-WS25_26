@@ -536,20 +536,29 @@ def workflow_task_2_2_train_ms_sweep(
     dataset_1: dict,
     *,
     out_dir: str | Path = "artifacts/task2_2",
+    n_inits: int = 5,
+    steps_list: list[int] | None = None,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
 ):
     """
-    Task 2.2: Train MS(C)->P with multiple architectures and training steps.
+    Task 2.2: Train MS(C)->P with multiple architectures, multiple training steps,
+    and multiple random initializations per configuration.
 
-    Saves:
-      - model:  <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}.eqx
-      - meta:   <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}.json
+    Saves per run:
+      - model:   <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}_initXX.eqx
+      - meta:    <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}_initXX.json
+      - history: <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}_initXX_history.pkl
 
-    Returns a list of dicts (one per trained model) with paths + metrics.
+    Returns
+    -------
+    list[dict]
+      One meta dict per trained run.
     """
-
     out_dir = _ensure_dir(out_dir)
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000, 700_000, 900_000]
 
     # ----- Build calibration dataset (same as your code) -----
     C_cal_MS = jnp.concatenate([dataset_1["C_uni"], dataset_1["C_ps"], dataset_1["C_bi"]], axis=0)
@@ -559,7 +568,7 @@ def workflow_task_2_2_train_ms_sweep(
     Y_cal_MS = P_cal_MS.reshape(P_cal_MS.shape[0], 9)           # (N,9)
     train_data_MS = (X_cal_MS, Y_cal_MS)
 
-    # ----- Test sets (same transformation, evaluate consistently) -----
+    # ----- Test sets -----
     X_bi_test  = jax.vmap(td2.C_to_six)(dataset_1["C_bi_test"])
     Y_bi_test  = dataset_1["P_bi_test"].reshape(dataset_1["P_bi_test"].shape[0], 9)
 
@@ -572,87 +581,90 @@ def workflow_task_2_2_train_ms_sweep(
         ("medium", 3, 16),
         ("large",  4, 32),
     ]
-    steps_list = [100_000, 300_000, 500_000]
+
+    # Key pool (deterministic)
+    master_key = dataset_1["master_key"]
+    total_runs = len(archs) * len(steps_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
 
     results = []
 
-    master_key = dataset_1["master_key"]
-    base_seed = int(jrandom.randint(master_key, (), 0, 10_000_000))
-
-    run_idx = 0
     for arch_name, l, n in archs:
         for steps in steps_list:
-            run_idx += 1
+            for init_idx in range(n_inits):
+                model_key = keys[key_cursor]
+                train_key = keys[key_cursor + 1]
+                key_cursor += 2
 
-            # deterministic-ish keys per config
-            cfg_seed = base_seed + 1000 * run_idx + 10 * l + n + steps // 1000
-            model_key = jrandom.PRNGKey(cfg_seed + 1)
-            train_key = jrandom.PRNGKey(cfg_seed + 2)
+                # Build model
+                MS_model = tm.build(
+                    key=model_key,
+                    input_dim=6,
+                    output_dim=9,
+                    num_hidden_layers=l,
+                    nodes_per_layer=n,
+                    activations=jax.nn.softplus,
+                    constrain_icnn_weights=False
+                )
 
-            # Build model
-            MS_model = tm.build(
-                key=model_key,
-                input_dim=6,
-                output_dim=9,
-                num_hidden_layers=l,
-                nodes_per_layer=n,
-                activations=jax.nn.softplus,
-                constrain_icnn_weights=False
-            )
+                # Train
+                MS_trained, MS_history = tm.train_model(
+                    MS_model,
+                    train_data_MS,
+                    train_key,
+                    steps=steps,
+                    batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    loss_fn=tl.MSE(),
+                )
 
-            # Train
-            MS_trained, MS_history = tm.train_model(
-                MS_model,
-                train_data_MS,
-                train_key,
-                steps=steps,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
-                loss_fn=tl.MSE(),   # Task 2.2 baseline; swap to tl.WeightedMSE() if desired
-            )
+                MS_final = klax.finalize(MS_trained)
 
-            MS_final = klax.finalize(MS_trained)
+                # Evaluate RMSE on both test sets
+                P_bi_pred  = jax.vmap(MS_final)(X_bi_test)
+                P_mix_pred = jax.vmap(MS_final)(X_mix_test)
 
-            # Evaluate RMSE on both test sets (vectorized)
-            P_bi_pred  = jax.vmap(MS_final)(X_bi_test)
-            P_mix_pred = jax.vmap(MS_final)(X_mix_test)
+                rmse_bi  = float(jnp.sqrt(jnp.mean((P_bi_pred  - Y_bi_test)  ** 2)))
+                rmse_mix = float(jnp.sqrt(jnp.mean((P_mix_pred - Y_mix_test) ** 2)))
 
-            rmse_bi  = float(jnp.sqrt(jnp.mean((P_bi_pred  - Y_bi_test)  ** 2)))
-            rmse_mix = float(jnp.sqrt(jnp.mean((P_mix_pred - Y_mix_test) ** 2)))
+                # Save artifacts
+                tag = f"MS_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx+1:02d}"
+                model_path   = out_dir / f"{tag}.eqx"
+                meta_path    = out_dir / f"{tag}.json"
+                history_path = out_dir / f"{tag}_history.pkl"
 
-                        # Save model + metadata + history
-            tag = f"MS_{arch_name}_l{l}_n{n}_steps{steps}"
-            model_path   = out_dir / f"{tag}.eqx"
-            meta_path    = out_dir / f"{tag}.json"
-            history_path = out_dir / f"{tag}_history.pkl"
+                _save_eqx_model(MS_final, model_path)
+                _save_history(MS_history, history_path)
 
-            _save_eqx_model(MS_final, model_path)
-            _save_history(MS_history, history_path)
+                meta = {
+                    "task": "2.2",
+                    "model_id": "MS",
+                    "tag": tag,
+                    "arch_name": arch_name,
+                    "num_hidden_layers": l,
+                    "nodes_per_layer": n,
+                    "activation": "softplus",
+                    "steps": steps,
+                    "init_idx": int(init_idx + 1),
+                    "n_inits": int(n_inits),
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "train_dataset": "Dataset 1 calibration (uni + pure_shear + biax)",
+                    "test_sets": ["biax_test", "mixed_test"],
+                    "rmse_biax_test": rmse_bi,
+                    "rmse_mixed_test": rmse_mix,
+                    "saved_model_path": str(model_path),
+                    "saved_history_path": str(history_path),
+                }
 
-            meta = {
-                "model_id": "MS",
-                "tag": tag,
-                "arch_name": arch_name,
-                "num_hidden_layers": l,
-                "nodes_per_layer": n,
-                "steps": steps,
-                "batch_size": batch_size,
-                "learning_rate": learning_rate,
-                "activation": "softplus",
-                "train_dataset": "Dataset 1 calibration (uni + pure_shear + biax)",
-                "test_sets": ["biax_test", "mixed_test"],
-                "rmse_biax_test": rmse_bi,
-                "rmse_mixed_test": rmse_mix,
-                "saved_model_path": str(model_path),
-                "saved_history_path": str(history_path),
-            }
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
 
-            results.append(meta)
-
+                results.append(meta)
 
     return results
+
 
 def workflow_task_2_3_train_ms_weighted_5inits(
     dataset_1: dict,
