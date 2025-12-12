@@ -158,7 +158,7 @@ class SobolevModel(eqx.Module):
         return value, grad
     
 #for tasks 3, 4 (?)
-class SobolevModel_WI(eqx.Module):
+class SobolevModel_WI_ti(eqx.Module):
     nn: eqx.Module
     G_ti: jnp.ndarray
 
