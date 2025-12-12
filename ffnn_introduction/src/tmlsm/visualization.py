@@ -102,7 +102,8 @@ def plot_deformation_state_space(datasets_dict, components=None, title="State Sp
         "Train: Pure Shear": "PS",
         "Train: Biaxial": "Bi",
         "Test: Biaxial": "Bi*",
-        "Test: Mixed": "Mix*"
+        "Test: Mixed": "Mix*",
+        "Task4: Concentric": "T4"
     }
     
     # Farbpalette (konsistent für alle Plots)
@@ -150,12 +151,6 @@ def plot_deformation_state_space(datasets_dict, components=None, title="State Sp
             sns.boxplot(data=df_comp, x="Abbrev", y="Value", hue="Dataset",
                        palette=color_map, ax=ax, width=0.7, dodge=False,
                        legend=False)
-            
-            # Test-Punkte als Overlay
-            test_df = df_comp[df_comp["Type"] == "Test"]
-            if not test_df.empty:
-                sns.stripplot(data=test_df, x="Abbrev", y="Value",
-                            color="black", alpha=0.3, ax=ax, size=2)
             
             ax.set_title(f"$F_{{{row+1}{col+1}}}$", fontsize=14, fontweight='bold')
             ax.set_xlabel("")
@@ -353,20 +348,13 @@ def plot_F_diagonals(F, time=None, components=["F11", "F22", "F33"], title="Diag
 def plot_generalization_heatmap(results_df, title="Model Generalization: Test Error Heatmap"):
     """
     Plots a vertically split heatmap comparing two models across different
-    training set sizes and multiple runs.
-    
-    Args:
-        results_df: DataFrame with columns:
-            - 'Model': str ('Naive FFNN' or 'PANN')
-            - 'N_Train_Paths': int (number of training loadpaths)
-            - 'Run': int (run index 0-4)
-            - 'Test_Error': float (RMSE or similar metric)
-        title: str, plot title
+    training set sizes and multiple runs using a LOGARITHMIC color scale.
     """
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
-    
+    from matplotlib.colors import LogNorm  # WICHTIG für Log-Skala
+
     # Pivot für beide Modelle
     models = ['Naive FFNN', 'PANN']
     n_paths_list = sorted(results_df['N_Train_Paths'].unique())
@@ -378,6 +366,16 @@ def plot_generalization_heatmap(results_df, title="Model Generalization: Test Er
     vmin = results_df['Test_Error'].min()
     vmax = results_df['Test_Error'].max()
     
+    # Sicherstellen, dass vmin > 0 ist für Log-Scale
+    if vmin <= 0:
+        vmin = 1e-6 
+        
+    # Logarithmische Normalisierung definieren
+    norm = LogNorm(vmin=vmin, vmax=vmax)
+
+    # Visuelle Mitte für Textfarbe berechnen (Geometrisches Mittel bei Log-Skala)
+    log_midpoint = np.sqrt(vmin * vmax) 
+
     for ax, model_name in zip(axes, models):
         # Daten für dieses Modell filtern und pivotieren
         model_df = results_df[results_df['Model'] == model_name]
@@ -386,19 +384,22 @@ def plot_generalization_heatmap(results_df, title="Model Generalization: Test Er
         # Sicherstellen dass Spalten sortiert sind
         pivot = pivot.reindex(columns=n_paths_list)
         
-        # Heatmap
-        im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn_r',
-                       vmin=vmin, vmax=vmax)
+        # Heatmap mit 'norm' statt vmin/vmax direkt
+        im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn_r', norm=norm)
         
         # Werte in Zellen schreiben
         for i in range(pivot.shape[0]):
             for j in range(pivot.shape[1]):
                 val = pivot.values[i, j]
                 if not np.isnan(val):
-                    # Textfarbe basierend auf Hintergrund
-                    text_color = 'white' if val > (vmax + vmin) / 2 else 'black'
+                    # Textfarbe: Schwarz für mittlere Werte (Gelb), Weiß für Extreme (Rot/Grün)
+                    # Wir prüfen, ob der Wert weit genug vom Mittelwert weg ist
+                    # (Da RdYlGn_r in der Mitte hell ist und außen dunkel)
+                    is_middle = (vmin * 2 < val < vmax / 2) 
+                    text_color = 'black' if is_middle else 'white'
+                    
                     ax.text(j, i, f'{val:.3f}', ha='center', va='center',
-                           fontsize=9, color=text_color, fontweight='bold')
+                            fontsize=9, color=text_color, fontweight='bold')
         
         # Y-Achse: Runs
         ax.set_yticks(range(n_runs))
@@ -414,12 +415,16 @@ def plot_generalization_heatmap(results_df, title="Model Generalization: Test Er
     axes[1].set_xticklabels([str(n) for n in n_paths_list])
     axes[1].set_xlabel('Number of Training Loadpaths', fontsize=12)
     
-    # Colorbar
-    cbar = fig.colorbar(im, ax=axes, shrink=0.8, pad=0.02)
-    cbar.set_label('Test Error (RMSE)', fontsize=11)
+    # Layout anpassen, um Platz für die Colorbar rechts zu schaffen
+    # rect=[left, bottom, right, top] -> right=0.9 lässt 10% Platz rechts
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+    
+    # Colorbar rechts in den reservierten Platz legen
+    # 'ax=axes' sorgt dafür, dass sie sich auf beide Plots bezieht
+    cbar = fig.colorbar(im, ax=axes, shrink=0.8, pad=0.02, aspect=30)
+    cbar.set_label('Test Error (RMSE) - Log Scale', fontsize=11)
     
     plt.suptitle(title, fontsize=14, fontweight='bold')
-    plt.tight_layout()
     plt.show()
     
     return fig
@@ -998,5 +1003,54 @@ def plt_growth_cond(results, model_name="Model"):
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.legend()
     
+    plt.tight_layout()
+    plt.show()
+
+def plot_stretch_distribution_components(F_data, title="Principal Stretch Distribution"):
+    """
+    Histogram of principal stretches separated by component (λ₁, λ₂, λ₃).
+    
+    Args:
+        F_data: Array (N,3,3) or list of arrays
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Falls Liste, concatenieren
+    if isinstance(F_data, list):
+        F = np.concatenate(F_data, axis=0)
+    else:
+        F = np.array(F_data)
+    
+    # C = F^T @ F, dann Eigenwerte, dann sqrt für Hauptdehnungen
+    C = np.einsum('nij,nkj->nik', F, F)
+    eigenvalues = np.linalg.eigvalsh(C)  # Gibt sortierte Eigenwerte zurück (aufsteigend)
+    stretches = np.sqrt(eigenvalues)  # Shape: (N, 3)
+    
+    # Sortierung: λ₁ ≥ λ₂ ≥ λ₃ (absteigend)
+    stretches = np.sort(stretches, axis=1)[:, ::-1]
+    
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    
+    colors = ['#e74c3c', '#27ae60', '#3498db']
+    labels = ['$\\lambda_1$ (max)', '$\\lambda_2$ (mid)', '$\\lambda_3$ (min)']
+    
+    for i, (ax, color, label) in enumerate(zip(axes, colors, labels)):
+        ax.hist(stretches[:, i], bins=40, alpha=0.7, color=color, edgecolor='white')
+        ax.axvline(x=1.0, color='black', linestyle='--', linewidth=2, label='Undeformed')
+        ax.set_xlabel(f'Principal Stretch {label}', fontsize=11)
+        ax.set_ylabel('Count' if i == 0 else '', fontsize=11)
+        ax.set_title(label, fontsize=12, fontweight='bold')
+        ax.grid(True, linestyle=':', alpha=0.5)
+        
+        # Statistiken einblenden
+        mean_val = np.mean(stretches[:, i])
+        std_val = np.std(stretches[:, i])
+        ax.text(0.95, 0.95, f'μ = {mean_val:.2f}\nσ = {std_val:.2f}', 
+                transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.suptitle(title, fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.show()
