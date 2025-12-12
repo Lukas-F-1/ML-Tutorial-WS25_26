@@ -15,7 +15,7 @@ from . import data_t2 as td2
 from . import models as tm
 from . import losses as tl
 import pickle
-from pathlib import Path
+from typing import Any, Iterable, Literal
 
 
 #-----------------------Helper Functions
@@ -390,27 +390,184 @@ def prepare_dataset_3(
         "test_data_WI_cubic": test_data_WI_cubic,
     }
 
+# Functions for getting the test data
+def load_run_meta(meta_path: str | Path) -> dict:
+    meta_path = Path(meta_path)
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-#------------------------Workflows
+
+def _reconstruct_dataset3_test_from_meta(meta: dict, *, G_cub: jnp.ndarray, tol: float = 1e-8):
+    """
+    Reconstruct Dataset 3 test set EXACTLY as in prepare_dataset_3, but with keys and alpha validated
+    against meta.json.
+
+    Returns:
+      - For WICUB: ((F_test, I_test), (W_test, P_test))
+      - For WF / WF_AUG: (F_test, (W_test, P_test))
+    """
+    ds3_meta = meta.get("dataset_3", {})
+    path_h5 = ds3_meta.get("path_h5", None)
+    if path_h5 is None:
+        raise ValueError("Meta does not contain dataset_3.path_h5; cannot reconstruct Dataset 3.")
+
+    test_keys = ds3_meta.get("test_keys", None)
+    if not test_keys:
+        raise ValueError("Meta does not contain dataset_3.test_keys; cannot reconstruct Dataset 3 test set.")
+
+    alpha_ref = float(ds3_meta.get("alpha_scale", None))
+    if alpha_ref is None:
+        raise ValueError("Meta does not contain dataset_3.alpha_scale; cannot validate scaling.")
+
+    # Load all paths from H5
+    F_paths, P_paths, W_paths, J_paths, mode_names = td2.load_multiscale_paths(path_h5)
+
+    # Dicts by name
+    F_dict = {k: jnp.array(v) for k, v in zip(mode_names, F_paths)}
+    P_dict = {k: jnp.array(v) for k, v in zip(mode_names, P_paths)}
+    W_dict = {k: jnp.array(v) for k, v in zip(mode_names, W_paths)}
+
+    # Validate that requested keys exist
+    missing = [k for k in test_keys if k not in F_dict]
+    if missing:
+        raise ValueError(f"Meta test_keys not found in H5: {missing}")
+
+    # Recompute alpha exactly as in prepare_dataset_3 (global max |P|)
+    P_all = jnp.concatenate([P_dict[k] for k in mode_names], axis=0)
+    P_max = jnp.max(jnp.abs(P_all))
+    alpha = float(1.0 / P_max)
+
+    if abs(alpha - alpha_ref) > tol:
+        raise ValueError(
+            f"Dataset 3 alpha mismatch. meta alpha={alpha_ref}, recomputed alpha={alpha}. "
+            f"This indicates a different H5 file, a modified dataset, or non-matching preprocessing."
+        )
+
+    # Scale per path (exactly as training)
+    P_scaled_dict = {k: alpha * P_dict[k] for k in mode_names}
+    W_scaled_dict = {k: alpha * W_dict[k] for k in mode_names}
+
+    # Build test arrays in the exact order stored in meta["test_keys"]
+    F_test = jnp.concatenate([F_dict[k] for k in test_keys], axis=0)
+    P_test = jnp.concatenate([P_scaled_dict[k] for k in test_keys], axis=0)
+    W_test = jnp.concatenate([W_scaled_dict[k] for k in test_keys], axis=0)
+
+    # Invariants for cubic WI
+    I_test = td2.compute_all_invariants_cubic(F_test, G_cub)
+
+    return {
+        "F_test": F_test,
+        "I_test": I_test,
+        "W_test": W_test,
+        "P_test": P_test,
+        "alpha": alpha,
+        "test_keys": test_keys,
+    }
+
+
+def get_test_data_for_run(
+    meta_path: str | Path,
+    *,
+    dataset_1: dict | None = None,
+    G_cub: jnp.ndarray | None = None,
+):
+    """
+    No-brainer test-set getter.
+
+    It uses the run's meta.json to determine:
+      - which dataset the model belongs to
+      - which test sets apply
+      - how scaling/splitting was done (Dataset 3 models)
+    and returns the test data in the correct format for that model.
+
+    Returns
+    -------
+    dict[str, object]
+      Keys are explicit test-set names so you cannot "accidentally pick the wrong one".
+    """
+    meta = load_run_meta(meta_path)
+    model_id = meta.get("model_id", "").upper()
+
+    # ------------------------
+    # Dataset 1 models (Task 2/3)
+    # ------------------------
+    if model_id in ("MS", "MSW"):
+        if dataset_1 is None:
+            raise ValueError("MS/MSW require dataset_1=prepare_dataset_1(...) to guarantee correct test sets.")
+
+        # Workflows explicitly use biax_test and mixed_test for MS/MSW. 
+        X_bi_test = jax.vmap(td2.C_to_six)(dataset_1["C_bi_test"])
+        Y_bi_test = dataset_1["P_bi_test"].reshape(dataset_1["P_bi_test"].shape[0], 9)
+
+        X_mix_test = jax.vmap(td2.C_to_six)(dataset_1["C_mix_test"])
+        Y_mix_test = dataset_1["P_mix_test"].reshape(dataset_1["P_mix_test"].shape[0], 9)
+
+        return {
+            "biax_test": (X_bi_test, Y_bi_test),
+            "mixed_test": (X_mix_test, Y_mix_test),
+        }
+
+    if model_id == "WITI":
+        if dataset_1 is None:
+            raise ValueError("WITI requires dataset_1=prepare_dataset_1(...) to guarantee correct test set.")
+        # In Task 3 you evaluate on mixed_test (and sometimes identity). 
+        return {
+            "mixed_test": ((dataset_1["F_mix_test"], dataset_1["I_mix_test"]),
+                           (dataset_1["W_mix_test"], dataset_1["P_mix_test"])),
+            "biax_test": ((dataset_1["F_bi_test"], dataset_1["I_bi_test"]),
+                          (dataset_1["W_bi_test"], dataset_1["P_bi_test"])),
+        }
+
+    # ------------------------
+    # Dataset 3 models (Task 5)
+    # ------------------------
+    if model_id in ("WICUB", "WF", "WF_AUG"):
+        if G_cub is None:
+            raise ValueError("WICUB/WF/WF_AUG require G_cub to reconstruct invariants consistently.")
+        ds3 = _reconstruct_dataset3_test_from_meta(meta, G_cub=G_cub)
+
+        if model_id == "WICUB":
+            return {
+                "dataset3_test": ((ds3["F_test"], ds3["I_test"]), (ds3["W_test"], ds3["P_test"])),
+            }
+
+        # WF and WF_AUG: model input is F only; test set is never augmented in Task 5.4. 
+        return {
+            "dataset3_test": (ds3["F_test"], (ds3["W_test"], ds3["P_test"])),
+        }
+
+    raise ValueError(f"Unknown or unsupported model_id='{model_id}' in meta: {meta_path}")
+
+
+#------------------------Workflows Model Training
 
 def workflow_task_2_2_train_ms_sweep(
     dataset_1: dict,
     *,
     out_dir: str | Path = "artifacts/task2_2",
+    n_inits: int = 5,
+    steps_list: list[int] | None = None,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
 ):
     """
-    Task 2.2: Train MS(C)->P with multiple architectures and training steps.
+    Task 2.2: Train MS(C)->P with multiple architectures, multiple training steps,
+    and multiple random initializations per configuration.
 
-    Saves:
-      - model:  <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}.eqx
-      - meta:   <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}.json
+    Saves per run:
+      - model:   <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}_initXX.eqx
+      - meta:    <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}_initXX.json
+      - history: <out_dir>/MS_<arch>_l{l}_n{n}_steps{steps}_initXX_history.pkl
 
-    Returns a list of dicts (one per trained model) with paths + metrics.
+    Returns
+    -------
+    list[dict]
+      One meta dict per trained run.
     """
-
     out_dir = _ensure_dir(out_dir)
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000, 700_000, 900_000]
 
     # ----- Build calibration dataset (same as your code) -----
     C_cal_MS = jnp.concatenate([dataset_1["C_uni"], dataset_1["C_ps"], dataset_1["C_bi"]], axis=0)
@@ -420,7 +577,7 @@ def workflow_task_2_2_train_ms_sweep(
     Y_cal_MS = P_cal_MS.reshape(P_cal_MS.shape[0], 9)           # (N,9)
     train_data_MS = (X_cal_MS, Y_cal_MS)
 
-    # ----- Test sets (same transformation, evaluate consistently) -----
+    # ----- Test sets -----
     X_bi_test  = jax.vmap(td2.C_to_six)(dataset_1["C_bi_test"])
     Y_bi_test  = dataset_1["P_bi_test"].reshape(dataset_1["P_bi_test"].shape[0], 9)
 
@@ -433,87 +590,90 @@ def workflow_task_2_2_train_ms_sweep(
         ("medium", 3, 16),
         ("large",  4, 32),
     ]
-    steps_list = [100_000, 300_000, 500_000]
+
+    # Key pool (deterministic)
+    master_key = dataset_1["master_key"]
+    total_runs = len(archs) * len(steps_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
 
     results = []
 
-    master_key = dataset_1["master_key"]
-    base_seed = int(jrandom.randint(master_key, (), 0, 10_000_000))
-
-    run_idx = 0
     for arch_name, l, n in archs:
         for steps in steps_list:
-            run_idx += 1
+            for init_idx in range(n_inits):
+                model_key = keys[key_cursor]
+                train_key = keys[key_cursor + 1]
+                key_cursor += 2
 
-            # deterministic-ish keys per config
-            cfg_seed = base_seed + 1000 * run_idx + 10 * l + n + steps // 1000
-            model_key = jrandom.PRNGKey(cfg_seed + 1)
-            train_key = jrandom.PRNGKey(cfg_seed + 2)
+                # Build model
+                MS_model = tm.build(
+                    key=model_key,
+                    input_dim=6,
+                    output_dim=9,
+                    num_hidden_layers=l,
+                    nodes_per_layer=n,
+                    activations=jax.nn.softplus,
+                    constrain_icnn_weights=False
+                )
 
-            # Build model
-            MS_model = tm.build(
-                key=model_key,
-                input_dim=6,
-                output_dim=9,
-                num_hidden_layers=l,
-                nodes_per_layer=n,
-                activations=jax.nn.softplus,
-                constrain_icnn_weights=False
-            )
+                # Train
+                MS_trained, MS_history = tm.train_model(
+                    MS_model,
+                    train_data_MS,
+                    train_key,
+                    steps=steps,
+                    batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    loss_fn=tl.MSE(),
+                )
 
-            # Train
-            MS_trained, MS_history = tm.train_model(
-                MS_model,
-                train_data_MS,
-                train_key,
-                steps=steps,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
-                loss_fn=tl.MSE(),   # Task 2.2 baseline; swap to tl.WeightedMSE() if desired
-            )
+                MS_final = klax.finalize(MS_trained)
 
-            MS_final = klax.finalize(MS_trained)
+                # Evaluate RMSE on both test sets
+                P_bi_pred  = jax.vmap(MS_final)(X_bi_test)
+                P_mix_pred = jax.vmap(MS_final)(X_mix_test)
 
-            # Evaluate RMSE on both test sets (vectorized)
-            P_bi_pred  = jax.vmap(MS_final)(X_bi_test)
-            P_mix_pred = jax.vmap(MS_final)(X_mix_test)
+                rmse_bi  = float(jnp.sqrt(jnp.mean((P_bi_pred  - Y_bi_test)  ** 2)))
+                rmse_mix = float(jnp.sqrt(jnp.mean((P_mix_pred - Y_mix_test) ** 2)))
 
-            rmse_bi  = float(jnp.sqrt(jnp.mean((P_bi_pred  - Y_bi_test)  ** 2)))
-            rmse_mix = float(jnp.sqrt(jnp.mean((P_mix_pred - Y_mix_test) ** 2)))
+                # Save artifacts
+                tag = f"MS_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx+1:02d}"
+                model_path   = out_dir / f"{tag}.eqx"
+                meta_path    = out_dir / f"{tag}.json"
+                history_path = out_dir / f"{tag}_history.pkl"
 
-                        # Save model + metadata + history
-            tag = f"MS_{arch_name}_l{l}_n{n}_steps{steps}"
-            model_path   = out_dir / f"{tag}.eqx"
-            meta_path    = out_dir / f"{tag}.json"
-            history_path = out_dir / f"{tag}_history.pkl"
+                _save_eqx_model(MS_final, model_path)
+                _save_history(MS_history, history_path)
 
-            _save_eqx_model(MS_final, model_path)
-            _save_history(MS_history, history_path)
+                meta = {
+                    "task": "2.2",
+                    "model_id": "MS",
+                    "tag": tag,
+                    "arch_name": arch_name,
+                    "num_hidden_layers": l,
+                    "nodes_per_layer": n,
+                    "activation": "softplus",
+                    "steps": steps,
+                    "init_idx": int(init_idx + 1),
+                    "n_inits": int(n_inits),
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "train_dataset": "Dataset 1 calibration (uni + pure_shear + biax)",
+                    "test_sets": ["biax_test", "mixed_test"],
+                    "rmse_biax_test": rmse_bi,
+                    "rmse_mixed_test": rmse_mix,
+                    "saved_model_path": str(model_path),
+                    "saved_history_path": str(history_path),
+                }
 
-            meta = {
-                "model_id": "MS",
-                "tag": tag,
-                "arch_name": arch_name,
-                "num_hidden_layers": l,
-                "nodes_per_layer": n,
-                "steps": steps,
-                "batch_size": batch_size,
-                "learning_rate": learning_rate,
-                "activation": "softplus",
-                "train_dataset": "Dataset 1 calibration (uni + pure_shear + biax)",
-                "test_sets": ["biax_test", "mixed_test"],
-                "rmse_biax_test": rmse_bi,
-                "rmse_mixed_test": rmse_mix,
-                "saved_model_path": str(model_path),
-                "saved_history_path": str(history_path),
-            }
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
 
-            results.append(meta)
-
+                results.append(meta)
 
     return results
+
 
 def workflow_task_2_3_train_ms_weighted_5inits(
     dataset_1: dict,
@@ -1724,3 +1884,438 @@ def workflow_task_5_4_train_wf_augmented(
             results.append(meta)
 
     return results
+
+
+#------------------------Workflows Model Evaluation
+
+def get_test_data_for_model_id(
+    model_id: str,
+    *,
+    dataset_1: dict | None = None,
+    dataset_3: dict | None = None,
+    include_identity: bool = True,
+):
+    """
+    Return the correct test dataset(s) in the correct format for a given model_id.
+
+    Parameters
+    ----------
+    model_id:
+        One of: "MS", "MSW", "WITI", "WICUB", "WF", "WF_AUG"
+        (based on your current workflows.py)
+
+    dataset_1:
+        Output of prepare_dataset_1(). Required for Dataset 1 models:
+          - MS, MSW, WITI
+
+    dataset_3:
+        Output of prepare_dataset_3(). Required for Dataset 3 models:
+          - WICUB, WF, WF_AUG
+
+    include_identity:
+        If True and model_id supports it, include an identity test case.
+
+    Returns
+    -------
+    dict[str, tuple]:
+        A dictionary mapping test-set name -> test_data tuple in the expected format.
+
+        Formats:
+          - MS / MSW:
+              test_data = (X_test, Y_test)  where
+                X_test: (N,6)  = C_to_six(C(F))
+                Y_test: (N,9)  = vec(P)
+
+          - WITI:
+              test_data = ((F_test, I_test), (W_test, P_test))
+              (no weights in test)
+
+          - WICUB:
+              test_data = ((F_test, I_test), (W_test, P_test))
+              (already prepared by prepare_dataset_3)
+
+          - WF / WF_AUG:
+              test_data = (F_test, (W_test, P_test))
+              (model input is F only)
+    """
+    model_id = model_id.upper()
+
+    out = {}
+
+    # ----------------------------
+    # Dataset 1 models
+    # ----------------------------
+    if model_id in ("MS", "MSW", "WITI"):
+        if dataset_1 is None:
+            raise ValueError(f"model_id='{model_id}' requires dataset_1=prepare_dataset_1(...)")
+
+    # MS / MSW: C->six as input, P reshaped to (N,9)
+    if model_id in ("MS", "MSW"):
+        # biax_test
+        X_bi_test = jax.vmap(td2.C_to_six)(dataset_1["C_bi_test"])
+        Y_bi_test = dataset_1["P_bi_test"].reshape(dataset_1["P_bi_test"].shape[0], 9)
+        out["biax_test"] = (X_bi_test, Y_bi_test)
+
+        # mixed_test
+        X_mix_test = jax.vmap(td2.C_to_six)(dataset_1["C_mix_test"])
+        Y_mix_test = dataset_1["P_mix_test"].reshape(dataset_1["P_mix_test"].shape[0], 9)
+        out["mixed_test"] = (X_mix_test, Y_mix_test)
+
+        return out
+
+    # WITI: invariant-based model, test format ((F,I),(W,P))
+    if model_id == "WITI":
+        # mixed_test (main task-3 test)
+        out["mixed_test"] = (
+            (dataset_1["F_mix_test"], dataset_1["I_mix_test"]),
+            (dataset_1["W_mix_test"], dataset_1["P_mix_test"])
+        )
+
+        # optional additional test set: biax_test
+        out["biax_test"] = (
+            (dataset_1["F_bi_test"], dataset_1["I_bi_test"]),
+            (dataset_1["W_bi_test"], dataset_1["P_bi_test"])
+        )
+
+        if include_identity:
+            G_ti = dataset_1["G_ti"]
+            F_I = jnp.eye(3)[None, :, :]          # (1,3,3)
+            I_I = td2.compute_all_invariants(F_I, G_ti)
+            # you may or may not have analytical references available; keep targets optional
+            out["identity_input_only"] = ((F_I, I_I), None)
+
+        return out
+
+    # ----------------------------
+    # Dataset 3 models
+    # ----------------------------
+    if model_id in ("WICUB", "WF", "WF_AUG"):
+        if dataset_3 is None:
+            raise ValueError(f"model_id='{model_id}' requires dataset_3=prepare_dataset_3(...)")
+
+    # WICUB: already packaged by prepare_dataset_3
+    if model_id == "WICUB":
+        out["dataset3_test"] = dataset_3["test_data_WI_cubic"]
+        if include_identity:
+            # cubic identity: build (F,I) input only
+            F_I = jnp.eye(3)[None, :, :]
+            # NOTE: prepare_dataset_3 does not store G_cub; caller should re-use same G_cub they used.
+            # If you want identity for cubic invariants, pass it externally or store G_cub in dataset_3.
+            out["identity_input_only_note"] = "To add identity for WICUB, store G_cub in dataset_3 or pass it in."
+        return out
+
+    # WF / WF_AUG: F-only input, test format (F,(W,P))
+    if model_id in ("WF", "WF_AUG"):
+        out["dataset3_test"] = (
+            dataset_3["F_test"],
+            (dataset_3["W_test"], dataset_3["P_test"])
+        )
+        if include_identity:
+            F_I = jnp.eye(3)[None, :, :]
+            out["identity_input_only"] = (F_I, None)
+        return out
+
+    raise ValueError(
+        f"Unknown model_id='{model_id}'. Expected one of: "
+        f"MS, MSW, WITI, WICUB, WF, WF_AUG"
+    )
+
+# ------------------------------------------------------------
+# Generic model loader
+# ------------------------------------------------------------
+
+
+
+def load_saved_models(
+    artifacts_dir: str | Path,
+    *,
+    # Filter: only load certain model families, e.g. "MS", "MSW", "WITI", "WICUB", "WF", "WF_AUG"
+    model_id: str | None = None,
+    # Filter: for Task 4 (meta["model_type"] is "FFNN" or "PANN")
+    model_type: str | None = None,
+    # Optional: restrict to tags containing these substrings (AND semantics)
+    tag_contains: str | Iterable[str] | None = None,
+    # Required only for WI TI models (WITI / PANN in your repo)
+    dataset_1: dict | None = None,
+    # Required only for WICUB models
+    G_cub=None,
+    # Deterministic key to build "like" structures
+    like_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
+    # Strictness: if True, missing eqx/meta raises; else skips
+    strict: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """
+    Load saved EQX models from a directory of artifacts produced by workflows.py.
+
+    Returns
+    -------
+    dict[tag, {"model": <equinox.Module>, "meta": dict, "eqx_path": Path, "meta_path": Path}]
+    """
+
+    artifacts_dir = Path(artifacts_dir)
+    if not artifacts_dir.exists():
+        raise FileNotFoundError(f"artifacts_dir does not exist: {artifacts_dir}")
+
+    # Normalize filters
+    model_id_u = model_id.upper() if model_id else None
+    model_type_u = model_type.upper() if model_type else None
+
+    if isinstance(tag_contains, str):
+        tag_contains_list = [tag_contains]
+    elif tag_contains is None:
+        tag_contains_list = []
+    else:
+        tag_contains_list = list(tag_contains)
+
+    meta_paths = sorted(artifacts_dir.glob("*.json"))
+    if not meta_paths:
+        raise FileNotFoundError(f"No *.json meta files found in: {artifacts_dir}")
+
+    loaded: dict[str, dict[str, Any]] = {}
+
+    for mp in meta_paths:
+        meta = _load_run_meta_local(mp)
+
+        # ---- Identify model family (Task 2/3/5 uses model_id; Task 4 uses model_type) ----
+        mid = str(meta.get("model_id", "")).upper().strip()
+        mtype = str(meta.get("model_type", "")).upper().strip()
+        tag = str(meta.get("tag", meta.get("model_name", mp.stem)))
+
+        # Apply filters
+        if model_id_u and mid != model_id_u:
+            continue
+        if model_type_u and mtype != model_type_u:
+            continue
+        if tag_contains_list and not all(s in tag for s in tag_contains_list):
+            continue
+
+        # ---- Find eqx path ----
+        eqx_path = _resolve_eqx_path_from_meta(meta, meta_path=mp)
+
+        if not eqx_path.exists():
+            msg = f"EQX file not found for meta '{mp.name}': {eqx_path}"
+            if strict:
+                raise FileNotFoundError(msg)
+            else:
+                print(f"[load_saved_models] SKIP: {msg}")
+                continue
+
+        # ---- Build like-model ----
+        like_model = _build_like_model_from_meta(
+            meta,
+            like_key=like_key,
+            dataset_1=dataset_1,
+            G_cub=G_cub,
+        )
+
+        # ---- IMPORTANT: WITI like-model must be finalized before deserialisation ----
+        if str(meta.get("model_id", "")).upper().strip() == "WITI":
+            like_model = klax.finalize(like_model)
+
+        # ---- Deserialize ----
+        model = eqx.tree_deserialise_leaves(str(eqx_path), like=like_model)
+
+        # Optional safety net (harmless if already finalized)
+        if str(meta.get("model_id", "")).upper().strip() == "WITI":
+            model = klax.finalize(model)
+
+
+        loaded[tag] = {
+            "model": model,
+            "meta": meta,
+            "eqx_path": eqx_path,
+            "meta_path": mp,
+        }
+
+    if not loaded and strict:
+        raise FileNotFoundError(
+            f"No models loaded from {artifacts_dir} with filters: "
+            f"model_id={model_id_u}, model_type={model_type_u}, tag_contains={tag_contains_list}"
+        )
+
+    return loaded
+
+
+# -------------------------
+# Internal helpers
+# -------------------------
+def _load_run_meta_local(meta_path: str | Path) -> dict[str, Any]:
+    meta_path = Path(meta_path)
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _resolve_eqx_path_from_meta(meta: dict[str, Any], *, meta_path: Path) -> Path:
+    """
+    Prefer meta["saved_model_path"]. If absent, infer {meta_path.stem}.eqx in same folder.
+    """
+    p = meta.get("saved_model_path", None)
+    if p:
+        return Path(p)
+    # Fallback to same-stem .eqx next to meta
+    return meta_path.with_suffix(".eqx")
+
+
+import re
+
+def _get_arch_from_meta(meta: dict[str, Any]) -> tuple[int, int]:
+    """
+    Supported sources (in priority order):
+      1) meta["num_hidden_layers"], meta["nodes_per_layer"]
+      2) meta["architecture"]["l"], meta["architecture"]["n"]
+      3) meta["benchmark_architecture"]["l"], meta["benchmark_architecture"]["n"]   (Task 3 section 1)
+      4) parse from meta["tag"] like "..._l3_n16_..."                               (fallback)
+    """
+    if "num_hidden_layers" in meta and "nodes_per_layer" in meta:
+        return int(meta["num_hidden_layers"]), int(meta["nodes_per_layer"])
+
+    arch = meta.get("architecture", {}) or {}
+    if "l" in arch and "n" in arch:
+        return int(arch["l"]), int(arch["n"])
+
+    bench = meta.get("benchmark_architecture", {}) or {}
+    if "l" in bench and "n" in bench:
+        return int(bench["l"]), int(bench["n"])
+
+    tag = str(meta.get("tag", ""))
+    m = re.search(r"_l(\d+)_n(\d+)_", tag)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+
+    raise KeyError(
+        "Could not find architecture in meta (expected num_hidden_layers/nodes_per_layer "
+        "or architecture.{l,n} or benchmark_architecture.{l,n}, or parseable _l*_n* in tag)."
+    )
+
+
+def _build_like_model_from_meta(
+    meta: dict[str, Any],
+    *,
+    like_key: jrandom.PRNGKey,
+    dataset_1: dict | None,
+    G_cub,
+):
+    """
+    Constructs the correct model *structure* required by eqx.tree_deserialise_leaves.
+    """
+    mid = str(meta.get("model_id", "")).upper().strip()
+    mtype = str(meta.get("model_type", "")).upper().strip()
+
+    # Architecture
+    l, n = _get_arch_from_meta(meta)
+
+    # Activation: your workflows always save "softplus" in meta; keep it fixed here.
+    activation = jax.nn.softplus
+
+    # ------------------------------------------------------------
+    # Task 2 / MS, MSW (stress model: C->6 -> P(9))
+    # ------------------------------------------------------------
+    if mid in ("MS", "MSW"):
+        return tm.build(
+            key=like_key,
+            input_dim=6,
+            output_dim=9,
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activations=activation,
+            constrain_icnn_weights=False,
+        )
+
+    # ------------------------------------------------------------
+    # Task 3 / WITI (energy+stress from invariants; needs G_ti)
+    # ------------------------------------------------------------
+    if mid == "WITI":
+        if dataset_1 is None:
+            raise ValueError("Loading WITI requires dataset_1=prepare_dataset_1(...) so G_ti is available.")
+        G_ti = dataset_1["G_ti"]
+        return tm.SobolevModel_WI_ti(
+            G_ti=G_ti,
+            key=like_key,
+            input_dim=5,
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=activation,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+    # ------------------------------------------------------------
+    # Task 5.2 / WICUB (cubic invariants; needs G_cub)
+    # ------------------------------------------------------------
+    if mid == "WICUB":
+        if G_cub is None:
+            raise ValueError("Loading WICUB requires G_cub=... (same tensor used in prepare_dataset_3 / training).")
+        return tm.SobolevModel_WI_Cubic(
+            G_cub=G_cub,
+            key=like_key,
+            input_dim=6,
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=activation,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+    # ------------------------------------------------------------
+    # Task 5.3 / WF and Task 5.4 / WF_AUG (polyconvex ICNN W(F))
+    # ------------------------------------------------------------
+    if mid in ("WF", "WF_AUG"):
+        icnn = meta.get("icnn", {}) or {}
+        is_icnn = bool(icnn.get("is_icnn", True))
+        is_ficnn = bool(icnn.get("is_ficnn", False))
+        return tm.SobolevModel_WF(
+            key=like_key,
+            input_dim=19,
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=activation,
+            is_icnn=is_icnn,
+            is_ficnn=is_ficnn,
+        )
+
+    # ------------------------------------------------------------
+    # Task 4 (meta["model_type"] = "FFNN" or "PANN")
+    # Note: your repo uses SobolevModel_WI_ti; some cells call SobolevModel_WI.
+    # We support both by falling back to SobolevModel_WI_ti.
+    # ------------------------------------------------------------
+    if mtype in ("FFNN", "PANN"):
+        if mtype == "FFNN":
+            return tm.build(
+                key=like_key,
+                input_dim=6,
+                output_dim=9,
+                num_hidden_layers=l,
+                nodes_per_layer=n,
+                activations=activation,
+                constrain_icnn_weights=False,
+            )
+
+        # PANN (WI TI)
+        if dataset_1 is None:
+            raise ValueError("Loading Task-4 PANN requires dataset_1 or at least a dict containing G_ti.")
+        G_ti = dataset_1["G_ti"]
+
+        WI_cls = getattr(tm, "SobolevModel_WI", None)
+        if WI_cls is None:
+            WI_cls = tm.SobolevModel_WI_ti
+
+        return WI_cls(
+            G_ti=G_ti,
+            key=like_key,
+            input_dim=5,
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=activation,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+    raise ValueError(
+        f"Unknown model in meta. model_id='{mid}', model_type='{mtype}'. "
+        "Extend _build_like_model_from_meta for this case."
+    )
+
