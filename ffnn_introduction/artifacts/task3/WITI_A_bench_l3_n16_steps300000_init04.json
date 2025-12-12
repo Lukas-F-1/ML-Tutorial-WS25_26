@@ -1,0 +1,31 @@
+{
+  "task": "3",
+  "model_id": "WITI",
+  "strategy": "A",
+  "tag": "WITI_A_bench_l3_n16_steps300000_init04",
+  "benchmark_architecture": {
+    "l": 3,
+    "n": 16,
+    "activation": "softplus"
+  },
+  "steps": 300000,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "loss": "WeightedSobolevLoss",
+  "loss_params": {
+    "alpha": 1.0,
+    "beta": 0.0
+  },
+  "loss_weighting": "inverse path weights (uniaxial, pure shear, biaxial)",
+  "path_weights": {
+    "w_uni": 51.73220443725586,
+    "w_ps": 29.98426628112793,
+    "w_bi": 71.38219451904297,
+    "w_uni_inv": 0.01933031901717186,
+    "w_ps_inv": 0.03335082530975342,
+    "w_bi_inv": 0.01400909572839737,
+    "concat_order": "[biaxial, uniaxial, pure_shear]"
+  },
+  "saved_model_path": "artifacts\\task3\\WITI_A_bench_l3_n16_steps300000_init04.eqx",
+  "saved_history_path": "artifacts\\task3\\WITI_A_bench_l3_n16_steps300000_init04_history.pkl"
+}
