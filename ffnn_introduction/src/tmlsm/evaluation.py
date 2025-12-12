@@ -771,23 +771,53 @@ def component_error_distribution_grid(
     P_true,
     P_pred_dict: dict,
     title: str = "Per-component error distributions (boxplots)",
-    init_reduce: str = "mean",   # currently supports "mean" (future: median, etc.)
+    init_reduce: str = "mean",
+    use_symlog: bool = False,
+    symlog_linthresh: float = 1e-3,
 ):
     """
     3x3 grid; each subplot is one P_ij component.
-    In each subplot: boxplots of per-sample errors for each model.
+    Uses shared y-axis limits across all subplots.
 
-    Supports multiple initializations per model:
-      - P_pred_dict[name] can be (N,3,3) OR (K,N,3,3) OR list of (N,3,3).
-    The function reduces init dimension by averaging predictions across inits
-    (so errors reflect the averaged model response).
+    Parameters
+    ----------
+    use_symlog : bool
+        If True, use symmetric log scale (recommended for wide error ranges).
+    symlog_linthresh : float
+        Linear threshold around zero for symlog scale.
     """
     P_true = np.array(P_true)
 
     model_names = list(P_pred_dict.keys())
     num_models = len(model_names)
 
-    fig, axes = plt.subplots(3, 3, figsize=(12, 10))
+    # -------------------------------------------------
+    # 1) Precompute all errors to get global min/max
+    # -------------------------------------------------
+    all_errors = []
+
+    for name in model_names:
+        preds = _to_stacked_preds(P_pred_dict[name])  # (K,N,3,3)
+
+        if init_reduce == "mean":
+            P_pred_red = preds.mean(axis=0)
+        else:
+            raise ValueError(f"Unknown init_reduce='{init_reduce}'")
+
+        err = P_pred_red - P_true          # (N,3,3)
+        all_errors.append(err.reshape(-1))
+
+    all_errors = np.concatenate(all_errors)
+    e_min, e_max = all_errors.min(), all_errors.max()
+
+    # Add small padding so boxes don’t touch borders
+    pad = 0.05 * max(abs(e_min), abs(e_max))
+    y_min, y_max = e_min - pad, e_max + pad
+
+    # -------------------------------------------------
+    # 2) Plot grid with shared y-limits
+    # -------------------------------------------------
+    fig, axes = plt.subplots(3, 3, figsize=(12, 10), sharey=True)
     fig.suptitle(title, fontsize=14)
 
     comp_labels = [["11", "12", "13"],
@@ -800,19 +830,19 @@ def component_error_distribution_grid(
             data = []
 
             for name in model_names:
-                preds = _to_stacked_preds(P_pred_dict[name])  # (K,N,3,3)
-
-                if init_reduce == "mean":
-                    P_pred_red = preds.mean(axis=0)           # (N,3,3)
-                else:
-                    raise ValueError(f"Unknown init_reduce='{init_reduce}'")
-
-                e = (P_pred_red - P_true)[:, i, j]            # (N,)
+                preds = _to_stacked_preds(P_pred_dict[name])
+                P_pred_red = preds.mean(axis=0)
+                e = (P_pred_red - P_true)[:, i, j]
                 data.append(e)
 
-            bp = ax.boxplot(data, patch_artist=True)
+            bp = ax.boxplot(data, patch_artist=True, showfliers=True)
             for patch in bp["boxes"]:
                 patch.set_alpha(0.6)
+
+            ax.set_ylim(y_min, y_max)
+
+            if use_symlog:
+                ax.set_yscale("symlog", linthresh=symlog_linthresh)
 
             ax.set_xticks(range(1, num_models + 1))
             ax.set_xticklabels(model_names, rotation=45, ha="right", fontsize=8)
@@ -821,6 +851,7 @@ def component_error_distribution_grid(
 
     plt.tight_layout()
     plt.show()
+
 
 
 def component_rmse_barplot(
