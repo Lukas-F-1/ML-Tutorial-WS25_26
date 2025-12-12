@@ -160,7 +160,7 @@ def _run_single_task4(args):
     from . import losses as tl
     from . import data_t2 as td2
     
-    (model_type, n_train, run_idx,
+    (model_type, n_train, run_idx, init_idx,  # init_idx hinzugefügt
      all_C, all_I, all_F, all_W, all_P, inv_weights, G_ti,
      steps, num_hidden_layers, nodes_per_layer, batch_size, learning_rate,
      master_seed, out_dir) = args
@@ -170,13 +170,15 @@ def _run_single_task4(args):
     num_paths = len(all_C)
     test_size = max(0.1, min(0.9, 1.0 - (n_train / num_paths)))
     
+    # Seeds: run_idx für Datensplit, init_idx für Modell-Initialisierung
     base_seed = master_seed + run_idx * 10000 + n_train * 100
-    split_key = jrandom.PRNGKey(base_seed)
-    model_key = jrandom.PRNGKey(base_seed + (1 if model_type == 'FFNN' else 2))
-    train_key = jrandom.PRNGKey(base_seed + (3 if model_type == 'FFNN' else 4))
+    split_key = jrandom.PRNGKey(base_seed)  # gleich für alle inits im selben run
+    model_key = jrandom.PRNGKey(base_seed + init_idx * 1000 + (1 if model_type == 'FFNN' else 2))
+    train_key = jrandom.PRNGKey(base_seed + init_idx * 1000 + (3 if model_type == 'FFNN' else 4))
     
-    # File paths
-    tag = f"{model_type}_n{n_train:03d}_run{run_idx:02d}"
+    # Tag mit init
+    model_id = "WITI" if model_type == "PANN" else "MSW"
+    tag = f"{model_id}_n{n_train:03d}_l{num_hidden_layers}_n{nodes_per_layer}_run{run_idx:02d}_init{init_idx:02d}"
     model_path = out_dir / f"{tag}.eqx"
     history_path = out_dir / f"{tag}_history.pkl"
     meta_path = out_dir / f"{tag}.json"
@@ -207,7 +209,7 @@ def _run_single_task4(args):
                 test_size=test_size, key=split_key)
             (F_test, I_test), (W_test, P_test) = test_data
             
-            model = tm.SobolevModel_WI(G_ti=G_ti, key=model_key, input_dim=5,
+            model = tm.SobolevModel_WI_ti(G_ti=G_ti, key=model_key, input_dim=5,
                                        output_dim="scalar",
                                        num_hidden_layers=num_hidden_layers,
                                        nodes_per_layer=nodes_per_layer,
@@ -225,24 +227,26 @@ def _run_single_task4(args):
             if P_test.ndim == 3: P_test = P_test.reshape(-1, 9)
             error = float(jnp.sqrt(jnp.mean((P_pred - P_test)**2)))
         
-        # Save model
         eqx.tree_serialise_leaves(str(model_path), final_model)
         
-        # Save history
         with open(history_path, "wb") as f:
             pickle.dump(history, f)
         
-        # Save meta
         meta = {
             "task": "4",
+            "model_id": model_id,
             "model_type": model_type,
-            "model_name": "Naive FFNN" if model_type == "FFNN" else "PANN",
+            "tag": tag,
             "n_train": n_train,
             "run_idx": run_idx,
+            "init_idx": init_idx,  # NEU
             "test_error": error,
+            "architecture": {
+                "num_hidden_layers": num_hidden_layers,
+                "nodes_per_layer": nodes_per_layer,
+                "activation": "softplus"
+            },
             "steps": steps,
-            "num_hidden_layers": num_hidden_layers,
-            "nodes_per_layer": nodes_per_layer,
             "batch_size": batch_size,
             "learning_rate": learning_rate,
             "test_size": test_size,
@@ -256,11 +260,16 @@ def _run_single_task4(args):
             json.dump(meta, f, indent=2)
             
     except Exception as e:
-        print(f"Error: {model_type} n={n_train} run={run_idx}: {e}")
+        print(f"Error: {model_type} n={n_train} run={run_idx} init={init_idx}: {e}")
         error = float('nan')
     
-    return {'Model': 'Naive FFNN' if model_type == 'FFNN' else 'PANN',
-            'N_Train_Paths': n_train, 'Run': run_idx, 'Test_Error': error}
+    return {
+        'Model': 'Naive FFNN' if model_type == 'FFNN' else 'PANN',
+        'N_Train_Paths': n_train,
+        'Run': run_idx,
+        'Init': init_idx,  # NEU
+        'Test_Error': error
+    }
 
 def prepare_dataset_3(
     *,
@@ -835,52 +844,6 @@ def workflow_task_3_train_wi_ti_strategies_abc(
 
     return results
 
-def workflow_task_4_generalization(
-    ds4: dict,
-    *,
-    out_dir: str | Path = "artifacts/task4",
-    n_paths_list: list[int] = [1, 2, 4, 8, 16, 32, 48, 64, 80],
-    n_runs: int = 5,
-    steps: int = 100_000,
-    num_hidden_layers: int = 3,
-    nodes_per_layer: int = 16,
-    batch_size: int = 32,
-    learning_rate: float = 1e-3,
-    n_jobs: int = -2,
-    master_seed: int = 42,
-):
-    """Task 4: Generalization experiment FFNN vs PANN with full persistence."""
-    from joblib import Parallel, delayed
-    import pandas as pd
-    
-    out_dir = Path(out_dir)
-    _ensure_dir(out_dir)
-    
-    # Build experiments list
-    experiments = []
-    for run_idx in range(n_runs):
-        for n_train in n_paths_list:
-            for model_type in ['FFNN', 'PANN']:
-                experiments.append((
-                    model_type, n_train, run_idx,
-                    ds4["all_C"], ds4["all_I"], ds4["all_F"],
-                    ds4["all_W"], ds4["all_P"], ds4["inv_weights"], ds4["G_ti"],
-                    steps, num_hidden_layers, nodes_per_layer, batch_size, learning_rate,
-                    master_seed, str(out_dir)
-                ))
-    
-    total = len(experiments)
-    print(f"Task 4: {len(n_paths_list)} sizes × {n_runs} runs × 2 models = {total} trainings")
-    
-    results = Parallel(n_jobs=n_jobs, verbose=total, backend='loky')(
-        delayed(_run_single_task4)(exp) for exp in experiments
-    )
-    
-    results_df = pd.DataFrame(results)
-    results_df.to_csv(out_dir / "results_summary.csv", index=False)
-    
-    return {"results_df": results_df, "out_dir": str(out_dir)}
-
 def workflow_task_3_sweep_wi_ti_arch_steps(
     dataset_1: dict,
     *,
@@ -1070,7 +1033,6 @@ def workflow_task_3_sweep_wi_ti_arch_steps(
                 results.append(meta)
 
     return results
-
 
 def workflow_task_3_calibration_set_study(
     dataset_1: dict,
@@ -1275,6 +1237,53 @@ def workflow_task_3_calibration_set_study(
             results.append(meta)
 
     return results
+
+def workflow_task_4_generalization(
+    ds4: dict,
+    *,
+    out_dir: str | Path = "artifacts/task4",
+    n_paths_list: list[int] = [1, 2, 4, 8, 16, 32, 48, 64, 80],
+    n_runs: int = 5,
+    n_inits: int = 1,  # NEU
+    steps: int = 100_000,
+    num_hidden_layers: int = 3,
+    nodes_per_layer: int = 16,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    n_jobs: int = -2,
+    master_seed: int = 42,
+):
+    """Task 4: Generalization experiment FFNN vs PANN with full persistence."""
+    from joblib import Parallel, delayed
+    import pandas as pd
+    
+    out_dir = Path(out_dir)
+    _ensure_dir(out_dir)
+    
+    experiments = []
+    for run_idx in range(n_runs):
+        for init_idx in range(n_inits):  # NEU
+            for n_train in n_paths_list:
+                for model_type in ['FFNN', 'PANN']:
+                    experiments.append((
+                        model_type, n_train, run_idx, init_idx,  # init_idx hinzugefügt
+                        ds4["all_C"], ds4["all_I"], ds4["all_F"],
+                        ds4["all_W"], ds4["all_P"], ds4["inv_weights"], ds4["G_ti"],
+                        steps, num_hidden_layers, nodes_per_layer, batch_size, learning_rate,
+                        master_seed, str(out_dir)
+                    ))
+    
+    total = len(experiments)
+    print(f"Task 4: {len(n_paths_list)} sizes × {n_runs} runs × {n_inits} inits × 2 models = {total} trainings")
+    
+    results = Parallel(n_jobs=n_jobs, verbose=total, backend='loky')(
+        delayed(_run_single_task4)(exp) for exp in experiments
+    )
+    
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(out_dir / f"results_summary_l{num_hidden_layers}_n{nodes_per_layer}_steps{steps}.csv", index=False)
+    
+    return {"results_df": results_df, "out_dir": str(out_dir)}
 
 def workflow_task_5_2_sweep_wi_cubic(
     dataset_3: dict,
