@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 import klax
+import itertools
 
 from . import data_t2 as td2
 from . import models as tm
@@ -17,7 +18,7 @@ import pickle
 from pathlib import Path
 
 
-#Helper Functions
+#-----------------------Helper Functions
 
 def _save_history(history, filepath: str | Path) -> None:
     filepath = Path(filepath)
@@ -261,7 +262,127 @@ def _run_single_task4(args):
     return {'Model': 'Naive FFNN' if model_type == 'FFNN' else 'PANN',
             'N_Train_Paths': n_train, 'Run': run_idx, 'Test_Error': error}
 
-#Workflows
+def prepare_dataset_3(
+    *,
+    path_h5: str | Path,
+    G_cub: jnp.ndarray,
+    calibration_name_filters: tuple[str, ...] = ("uniaxial", "shear_simple"),
+    test_name_filters: tuple[str, ...] = ("shear_combined",),
+):
+    """
+    Prepare Dataset 3 (multiscale deformation paths) in a reusable form.
+
+    Implements the logic from your Task 5 snippet:
+      - load multiscale paths from .h5
+      - compute alpha scaling from max |P| across all paths
+      - scale P and W per path
+      - compute inverse path weights per path from scaled stresses
+      - split calibration vs test paths based on name filters
+      - build calibration arrays + per-sample weights aligned with concatenation
+      - compute cubic invariants I(F, G_cub)
+      - package weighted Sobolev training data for WI_cubic
+
+    Returns
+    -------
+    dict with keys:
+      - mode_names, calibration_keys, test_keys
+      - F_dict, P_dict, W_dict (unscaled)
+      - P_scaled_dict, W_scaled_dict
+      - alpha
+      - inv_path_weights_dict
+      - F_cal, P_cal, W_cal, weights_cal, I_cal
+      - F_test, P_test, W_test, I_test
+      - train_data_WI_cubic, test_data_WI_cubic
+    """
+    path_h5 = str(path_h5)
+
+    # Load data separated into loadpaths
+    F_paths, P_paths, W_paths, J_paths, mode_names = td2.load_multiscale_paths(path_h5)
+
+    # Dict access by path name
+    F_dict = {k: jnp.array(v) for k, v in zip(mode_names, F_paths)}
+    P_dict = {k: jnp.array(v) for k, v in zip(mode_names, P_paths)}
+    W_dict = {k: jnp.array(v) for k, v in zip(mode_names, W_paths)}
+
+    # Flatten across all loadpaths to compute alpha
+    P_all = jnp.concatenate([P_dict[k] for k in mode_names], axis=0)
+    P_max = jnp.max(jnp.abs(P_all))
+    alpha = 1.0 / P_max
+
+    # Scale per path
+    P_scaled_dict = {k: alpha * P_dict[k] for k in mode_names}
+    W_scaled_dict = {k: alpha * W_dict[k] for k in mode_names}
+
+    # Inverse path weights from *scaled* stresses
+    inv_path_weights_dict = {}
+    for k in mode_names:
+        w_k = td2.compute_path_weight(P_scaled_dict[k])
+        inv_path_weights_dict[k] = 1.0 / w_k
+
+    # Select calibration/test keys by name filters (case-insensitive)
+    def _match_any(name: str, filters: tuple[str, ...]) -> bool:
+        name_l = name.lower()
+        return any(f.lower() in name_l for f in filters)
+
+    calibration_keys = [k for k in mode_names if _match_any(k, calibration_name_filters)]
+    test_keys = [k for k in mode_names if _match_any(k, test_name_filters)]
+
+    # Calibration data (scaled)
+    F_cal = jnp.concatenate([F_dict[k] for k in calibration_keys], axis=0)
+    P_cal = jnp.concatenate([P_scaled_dict[k] for k in calibration_keys], axis=0)
+    W_cal = jnp.concatenate([W_scaled_dict[k] for k in calibration_keys], axis=0)
+
+    # Per-sample weights aligned with the calibration concatenation order
+    weights_cal = jnp.concatenate(
+        [jnp.ones(P_scaled_dict[k].shape[0]) * inv_path_weights_dict[k] for k in calibration_keys],
+        axis=0
+    ).reshape(-1)
+
+    # Test data (scaled)
+    F_test = jnp.concatenate([F_dict[k] for k in test_keys], axis=0)
+    P_test = jnp.concatenate([P_scaled_dict[k] for k in test_keys], axis=0)
+    W_test = jnp.concatenate([W_scaled_dict[k] for k in test_keys], axis=0)
+
+    # Invariants (cubic)
+    I_cal = td2.compute_all_invariants_cubic(F_cal, G_cub)
+    I_test = td2.compute_all_invariants_cubic(F_test, G_cub)
+
+    # Package datasets
+    train_data_WI_cubic = (
+        (F_cal, I_cal),
+        ((W_cal, P_cal), weights_cal)
+    )
+    test_data_WI_cubic = (
+        (F_test, I_test),
+        (W_test, P_test)
+    )
+
+    return {
+        "path_h5": path_h5,
+        "mode_names": mode_names,
+        "calibration_keys": calibration_keys,
+        "test_keys": test_keys,
+
+        "F_dict": F_dict,
+        "P_dict": P_dict,
+        "W_dict": W_dict,
+
+        "alpha": alpha,
+        "P_max": P_max,
+
+        "P_scaled_dict": P_scaled_dict,
+        "W_scaled_dict": W_scaled_dict,
+        "inv_path_weights_dict": inv_path_weights_dict,
+
+        "F_cal": F_cal, "P_cal": P_cal, "W_cal": W_cal, "weights_cal": weights_cal, "I_cal": I_cal,
+        "F_test": F_test, "P_test": P_test, "W_test": W_test, "I_test": I_test,
+
+        "train_data_WI_cubic": train_data_WI_cubic,
+        "test_data_WI_cubic": test_data_WI_cubic,
+    }
+
+
+#------------------------Workflows
 
 def workflow_task_2_2_train_ms_sweep(
     dataset_1: dict,
@@ -759,3 +880,838 @@ def workflow_task_4_generalization(
     results_df.to_csv(out_dir / "results_summary.csv", index=False)
     
     return {"results_df": results_df, "out_dir": str(out_dir)}
+
+def workflow_task_3_sweep_wi_ti_arch_steps(
+    dataset_1: dict,
+    *,
+    strategy: str = "C",               # choose best from section 1: "A", "B", or "C"
+    out_dir: str | Path = "artifacts/task3_section2",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    archs=None,
+    steps_list=None,
+):
+    """
+    Task 3 (Section 2): Sweep WI_ti settings (architecture sizes + training steps)
+    using ONE chosen loss strategy (A/B/C) and the loss-weighted strategy.
+
+    Strategy meanings (WeightedSobolevLoss):
+      A: alpha=1, beta=0
+      B: alpha=0, beta=1
+      C: alpha=1, beta=1
+
+    Architectures:
+      default: small=(l=2,n=8), medium=(l=3,n=16), large=(l=4,n=32)
+
+    Steps:
+      default: [100k, 300k, 500k]
+
+    Each configuration is trained with n_inits random initializations.
+
+    Saves per run:
+      WITI_{strategy}_{arch}_l{l}_n{n}_steps{steps}_initXX.eqx
+      WITI_{strategy}_{arch}_l{l}_n{n}_steps{steps}_initXX_history.pkl
+      WITI_{strategy}_{arch}_l{l}_n{n}_steps{steps}_initXX.json
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    strategy = strategy.upper()
+    assert strategy in ("A", "B", "C"), "strategy must be 'A', 'B', or 'C'"
+
+    if archs is None:
+        archs = [
+            ("small",  2,  8),
+            ("medium", 3, 16),
+            ("large",  4, 32),
+        ]
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000]
+
+    G_ti = dataset_1["G_ti"]
+    master_key = dataset_1["master_key"]
+
+    # ------------------------------------------------------------
+    # Calibration data (same ordering as Task 3 Section 1):
+    # IMPORTANT: order [biaxial, uniaxial, pure_shear]
+    # ------------------------------------------------------------
+    F_bi  = dataset_1["F_bi"]
+    F_uni = dataset_1["F_uni"]
+    F_ps  = dataset_1["F_ps"]
+
+    P_bi  = dataset_1["P_bi"]
+    P_uni = dataset_1["P_uni"]
+    P_ps  = dataset_1["P_ps"]
+
+    W_bi  = dataset_1["W_bi"]
+    W_uni = dataset_1["W_uni"]
+    W_ps  = dataset_1["W_ps"]
+
+    I_bi  = dataset_1["I_bi"]
+    I_uni = dataset_1["I_uni"]
+    I_ps  = dataset_1["I_ps"]
+
+    F_cal_all = jnp.concatenate([F_bi, F_uni, F_ps], axis=0)
+    I_cal_all = jnp.concatenate([I_bi, I_uni, I_ps], axis=0)
+    W_cal_all = jnp.concatenate([W_bi, W_uni, W_ps], axis=0)
+    P_cal_all = jnp.concatenate([P_bi, P_uni, P_ps], axis=0)
+
+    # ------------------------------------------------------------
+    # Loss-weighting: inverse path weights
+    # ------------------------------------------------------------
+    w_uni = td2.compute_path_weight(P_uni)
+    w_ps  = td2.compute_path_weight(P_ps)
+    w_bi  = td2.compute_path_weight(P_bi)
+
+    w_uni_inv = 1.0 / w_uni
+    w_ps_inv  = 1.0 / w_ps
+    w_bi_inv  = 1.0 / w_bi
+
+    weights_bi  = w_bi_inv  * jnp.ones(P_bi.shape[0])
+    weights_uni = w_uni_inv * jnp.ones(P_uni.shape[0])
+    weights_ps  = w_ps_inv  * jnp.ones(P_ps.shape[0])
+
+    sample_weights = jnp.concatenate([weights_bi, weights_uni, weights_ps], axis=0).reshape(-1)
+
+    # Training data format for WeightedSobolevLoss:
+    train_data = (
+        (F_cal_all, I_cal_all),
+        ((W_cal_all, P_cal_all), sample_weights)
+    )
+
+    # ------------------------------------------------------------
+    # Choose loss function based on strategy
+    # ------------------------------------------------------------
+    if strategy == "A":
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=0.0)
+    elif strategy == "B":
+        loss_fn = tl.WeightedSobolevLoss(alpha=0.0, beta=1.0)
+    else:  # "C"
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=1.0)
+
+    # ------------------------------------------------------------
+    # Train sweep: arch × steps × init
+    # ------------------------------------------------------------
+    results = []
+    # allocate a large pool of keys
+    total_runs = len(archs) * len(steps_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    for arch_name, l, n in archs:
+        for steps in steps_list:
+            for init_idx in range(n_inits):
+                model_key = keys[key_cursor]
+                train_key = keys[key_cursor + 1]
+                key_cursor += 2
+
+                # Build WI_ti model with current architecture
+                WI_ti_model = tm.SobolevModel_WI_ti(
+                    G_ti=G_ti,
+                    key=model_key,
+                    input_dim=5,
+                    output_dim="scalar",
+                    num_hidden_layers=l,
+                    nodes_per_layer=n,
+                    activation=jax.nn.softplus,
+                    is_icnn=False,
+                    is_ficnn=True
+                )
+
+                trained_model, history = tm.train_WI(
+                    model=WI_ti_model,
+                    train_data=train_data,
+                    key=train_key,
+                    steps=steps,
+                    batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    loss_fn=loss_fn
+                )
+
+                final_model = klax.finalize(trained_model)
+
+                tag = f"WITI_{strategy}_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx+1:02d}"
+                model_path   = out_dir / f"{tag}.eqx"
+                history_path = out_dir / f"{tag}_history.pkl"
+                meta_path    = out_dir / f"{tag}.json"
+
+                eqx.tree_serialise_leaves(str(model_path), final_model)
+                with open(history_path, "wb") as f:
+                    pickle.dump(history, f)
+
+                meta = {
+                    "task": "3_section2",
+                    "model_id": "WITI",
+                    "strategy": strategy,
+                    "tag": tag,
+                    "num_hidden_layers": l,
+                    "nodes_per_layer": n,
+                    "activation": "softplus",
+                    "steps": steps,
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "loss": "WeightedSobolevLoss",
+                    "loss_params": {"alpha": float(loss_fn.alpha), "beta": float(loss_fn.beta)},
+                    "loss_weighting": "inverse path weights (uniaxial, pure shear, biaxial)",
+                    "path_weights": {
+                        "w_uni": float(w_uni), "w_ps": float(w_ps), "w_bi": float(w_bi),
+                        "w_uni_inv": float(w_uni_inv), "w_ps_inv": float(w_ps_inv), "w_bi_inv": float(w_bi_inv),
+                        "concat_order": "[biaxial, uniaxial, pure_shear]",
+                    },
+                    "saved_model_path": str(model_path),
+                    "saved_history_path": str(history_path),
+                }
+
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+
+                results.append(meta)
+
+    return results
+
+
+def workflow_task_3_calibration_set_study(
+    dataset_1: dict,
+    *,
+    # PLACEHOLDERS: you will set these after inspecting previous results
+    best_l: int = 3,
+    best_n: int = 16,
+    best_strategy: str = "C",          # "A" | "B" | "C"
+    steps: int = 300_000,
+
+    out_dir: str | Path = "artifacts/task3_calibration_study",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+
+    # which calibration paths are available:
+    # you can extend this dict later (e.g. add a 4th path) without changing the workflow
+    include_single_paths: bool = True,
+    include_pair_paths: bool = True,
+    include_all_paths: bool = True,
+):
+    """
+    Task 3 (final section): Train WI_ti on different calibration subsets (loadpath combinations)
+    using the best architecture + best loss strategy determined earlier.
+
+    - Uses loss-weighted strategy for each subset:
+        weight per sample = 1 / compute_path_weight(P_path)
+      and concatenates weights consistent with concatenation order.
+
+    - Trains n_inits random initializations per calibration subset.
+
+    Saves per run:
+      WITI_CAL_<subset>_<strategy>_l{l}_n{n}_steps{steps}_initXX.eqx
+      WITI_CAL_<subset>_<strategy>_l{l}_n{n}_steps{steps}_initXX_history.pkl
+      WITI_CAL_<subset>_<strategy>_l{l}_n{n}_steps{steps}_initXX.json
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    best_strategy = best_strategy.upper()
+    assert best_strategy in ("A", "B", "C"), "best_strategy must be 'A', 'B', or 'C'"
+
+    # Choose loss function
+    if best_strategy == "A":
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=0.0)
+    elif best_strategy == "B":
+        loss_fn = tl.WeightedSobolevLoss(alpha=0.0, beta=1.0)
+    else:
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=1.0)
+
+    G_ti = dataset_1["G_ti"]
+    master_key = dataset_1["master_key"]
+
+    # ------------------------------------------------------------------
+    # Available calibration paths (Dataset 1 calibration)
+    # NOTE: you can add a 4th calibration path here later if you have it.
+    # Each entry provides F, I, W, P for that path.
+    # ------------------------------------------------------------------
+    cal_paths = {
+        "biaxial": {
+            "F": dataset_1["F_bi"],
+            "I": dataset_1["I_bi"],
+            "W": dataset_1["W_bi"],
+            "P": dataset_1["P_bi"],
+        },
+        "uniaxial": {
+            "F": dataset_1["F_uni"],
+            "I": dataset_1["I_uni"],
+            "W": dataset_1["W_uni"],
+            "P": dataset_1["P_uni"],
+        },
+        "pure_shear": {
+            "F": dataset_1["F_ps"],
+            "I": dataset_1["I_ps"],
+            "W": dataset_1["W_ps"],
+            "P": dataset_1["P_ps"],
+        },
+    }
+
+    path_names = list(cal_paths.keys())
+
+    # ------------------------------------------------------------------
+    # Build list of calibration subsets
+    # - singletons:  (biaxial), (uniaxial), (pure_shear)
+    # - pairs:       (biaxial+uniaxial), ...
+    # - all:         (biaxial+uniaxial+pure_shear)
+    # ------------------------------------------------------------------
+    subsets = []
+    if include_single_paths:
+        subsets += [(p,) for p in path_names]
+    if include_pair_paths:
+        subsets += list(itertools.combinations(path_names, 2))
+    if include_all_paths:
+        subsets += [tuple(path_names)]
+
+    # ------------------------------------------------------------------
+    # Helper: build weighted training data for a given subset
+    # ------------------------------------------------------------------
+    def build_train_data_for_subset(subset):
+        # Concatenate in the subset order (subset tuple order)
+        F_all = jnp.concatenate([cal_paths[p]["F"] for p in subset], axis=0)
+        I_all = jnp.concatenate([cal_paths[p]["I"] for p in subset], axis=0)
+        W_all = jnp.concatenate([cal_paths[p]["W"] for p in subset], axis=0)
+        P_all = jnp.concatenate([cal_paths[p]["P"] for p in subset], axis=0)
+
+        # Compute per-path weights, then expand to per-sample weights
+        weights_list = []
+        weights_meta = {}
+        for p in subset:
+            P_path = cal_paths[p]["P"]
+            w_path = td2.compute_path_weight(P_path)
+            w_inv = 1.0 / w_path
+            weights_list.append(w_inv * jnp.ones(P_path.shape[0]))
+            weights_meta[p] = {"w": float(w_path), "w_inv": float(w_inv), "n_samples": int(P_path.shape[0])}
+
+        sample_weights = jnp.concatenate(weights_list, axis=0).reshape(-1)
+
+        train_data = (
+            (F_all, I_all),
+            ((W_all, P_all), sample_weights)
+        )
+        return train_data, weights_meta
+
+    # ------------------------------------------------------------------
+    # Train all subsets × n_inits
+    # ------------------------------------------------------------------
+    results = []
+    total_runs = len(subsets) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    for subset in subsets:
+        subset_tag = "+".join(subset)  # e.g. "biaxial+uniaxial"
+        train_data, weights_meta = build_train_data_for_subset(subset)
+
+        for init_idx in range(n_inits):
+            model_key = keys[key_cursor]
+            train_key = keys[key_cursor + 1]
+            key_cursor += 2
+
+            # Build best-architecture WI_ti model
+            model = tm.SobolevModel_WI_ti(
+                G_ti=G_ti,
+                key=model_key,
+                input_dim=5,
+                output_dim="scalar",
+                num_hidden_layers=best_l,
+                nodes_per_layer=best_n,
+                activation=jax.nn.softplus,
+                is_icnn=False,
+                is_ficnn=True
+            )
+
+            trained_model, history = tm.train_WI(
+                model=model,
+                train_data=train_data,
+                key=train_key,
+                steps=steps,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                loss_fn=loss_fn
+            )
+
+            final_model = klax.finalize(trained_model)
+
+            tag = (
+                f"WITI_CAL_{subset_tag}_{best_strategy}"
+                f"_l{best_l}_n{best_n}_steps{steps}"
+                f"_init{init_idx+1:02d}"
+            )
+
+            model_path   = out_dir / f"{tag}.eqx"
+            history_path = out_dir / f"{tag}_history.pkl"
+            meta_path    = out_dir / f"{tag}.json"
+
+            eqx.tree_serialise_leaves(str(model_path), final_model)
+            with open(history_path, "wb") as f:
+                pickle.dump(history, f)
+
+            meta = {
+                "task": "3_calibration_study",
+                "model_id": "WITI",
+                "tag": tag,
+                "subset": list(subset),
+                "subset_tag": subset_tag,
+                "architecture": {"l": best_l, "n": best_n, "activation": "softplus"},
+                "strategy": best_strategy,
+                "loss": "WeightedSobolevLoss",
+                "loss_params": {"alpha": float(loss_fn.alpha), "beta": float(loss_fn.beta)},
+                "steps": steps,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "loss_weighting": "inverse path weights computed on subset paths",
+                "weights_by_path": weights_meta,
+                "saved_model_path": str(model_path),
+                "saved_history_path": str(history_path),
+            }
+
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+
+            results.append(meta)
+
+    return results
+
+def workflow_task_5_2_sweep_wi_cubic(
+    dataset_3: dict,
+    *,
+    G_cub: jnp.ndarray,
+    out_dir: str | Path = "artifacts/task5_2",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    steps_list=None,
+    archs=None,
+    # default: energy-only like your snippet; override if you want later
+    loss_alpha: float = 1.0,
+    loss_beta: float = 0.0,
+    master_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
+):
+    """
+    Task 5.2: Sweep WI_cubic model configurations on Dataset 3.
+
+    Model: SobolevModel_WI_Cubic (W + grad(P) via Sobolev), trained with WeightedSobolevLoss.
+
+    Default sweep:
+      archs: small=(l=2,n=8), medium=(l=3,n=16), large=(l=4,n=32)
+      steps: [100k, 300k, 500k]
+      n_inits: 5
+
+    Training data is taken from dataset_3["train_data_WI_cubic"] which already includes weights.
+
+    Saves:
+      WICUB_<strategy>_<arch>_l{l}_n{n}_steps{steps}_initXX.eqx
+      ..._history.pkl
+      ...json
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000]
+
+    if archs is None:
+        archs = [
+            ("small",  2,  8),
+            ("medium", 3, 16),
+            ("large",  4, 32),
+        ]
+
+    train_data = dataset_3["train_data_WI_cubic"]
+    test_data = dataset_3["test_data_WI_cubic"]
+
+    loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
+    strategy_tag = f"a{loss_alpha:g}_b{loss_beta:g}"  # e.g. a1_b0
+
+    # keys for all runs
+    total_runs = len(archs) * len(steps_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    results = []
+
+    for arch_name, l, n in archs:
+        for steps in steps_list:
+            for init_idx in range(n_inits):
+                model_key = keys[key_cursor]
+                train_key = keys[key_cursor + 1]
+                key_cursor += 2
+
+                # Build WI_cubic model
+                WI_cubic_model = tm.SobolevModel_WI_Cubic(
+                    G_cub=G_cub,
+                    key=model_key,
+                    input_dim=6,          # cubic invariants dim
+                    output_dim="scalar",
+                    num_hidden_layers=l,
+                    nodes_per_layer=n,
+                    activation=jax.nn.softplus,
+                    is_icnn=False,
+                    is_ficnn=True
+                )
+
+                trained_model, history = tm.train_model(
+                    WI_cubic_model,
+                    train_data,
+                    train_key,
+                    steps=steps,
+                    batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    loss_fn=loss_fn
+                )
+
+                final_model = klax.finalize(trained_model)
+
+                tag = f"WICUB_{strategy_tag}_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx+1:02d}"
+                model_path = out_dir / f"{tag}.eqx"
+                hist_path  = out_dir / f"{tag}_history.pkl"
+                meta_path  = out_dir / f"{tag}.json"
+
+                # Use your existing helpers from earlier workflows:
+                _save_eqx_model(final_model, model_path)
+                _save_history(history, hist_path)
+
+                meta = {
+                    "task": "5.2",
+                    "model_id": "WICUB",
+                    "tag": tag,
+                    "architecture": {"l": l, "n": n, "activation": "softplus"},
+                    "steps": steps,
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "loss": "WeightedSobolevLoss",
+                    "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
+                    "dataset_3": {
+                        "path_h5": dataset_3.get("path_h5", None),
+                        "alpha_scale": float(dataset_3["alpha"]),
+                        "P_max": float(dataset_3["P_max"]),
+                        "n_cal_paths": len(dataset_3["calibration_keys"]),
+                        "n_test_paths": len(dataset_3["test_keys"]),
+                        "calibration_keys": dataset_3["calibration_keys"],
+                        "test_keys": dataset_3["test_keys"],
+                    },
+                    "saved_model_path": str(model_path),
+                    "saved_history_path": str(hist_path),
+                }
+
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+
+                results.append(meta)
+
+    return results
+
+def workflow_task_5_3_sweep_wf(
+    dataset_3: dict,
+    *,
+    out_dir: str | Path = "artifacts/task5_3",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    steps_list=None,
+    archs=None,
+    # default: energy-only like your snippet; keep configurable
+    loss_alpha: float = 1.0,
+    loss_beta: float = 0.0,
+    master_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
+):
+    """
+    Task 5.3: Sweep WF model configurations on Dataset 3 (training only).
+
+    Model: SobolevModel_WF
+      - Input to model call is F only.
+      - Model internally constructs (F, cofF, detF) (R^19).
+
+    Data:
+      - uses dataset_3["F_cal"], dataset_3["W_cal"], dataset_3["P_cal"], dataset_3["weights_cal"]
+      - uses dataset_3 scaling (alpha) and per-sample weights computed from scaled stresses
+
+    Sweep defaults:
+      archs: small=(l=2,n=8), medium=(l=3,n=16), large=(l=4,n=32)
+      steps: [100k, 300k, 500k]
+      n_inits: 5
+
+    Saves per run:
+      WF_{strategy}_{arch}_l{l}_n{n}_steps{steps}_initXX.eqx
+      WF_{strategy}_{arch}_l{l}_n{n}_steps{steps}_initXX_history.pkl
+      WF_{strategy}_{arch}_l{l}_n{n}_steps{steps}_initXX.json
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000]
+
+    if archs is None:
+        archs = [
+            ("small",  2,  8),
+            ("medium", 3, 16),
+            ("large",  4, 32),
+        ]
+
+    # Unpack dataset_3 (already scaled and properly aligned)
+    F_cal = dataset_3["F_cal"]
+    W_cal = dataset_3["W_cal"]
+    P_cal = dataset_3["P_cal"]
+    weights_cal = dataset_3["weights_cal"]
+
+    # Training data format for WeightedSobolevLoss:
+    # batch = (F, ((W_true, P_true), weights))
+    train_data_WF = (
+        F_cal,
+        ((W_cal, P_cal), weights_cal)
+    )
+
+    # Loss
+    loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
+    strategy_tag = f"a{loss_alpha:g}_b{loss_beta:g}"  # e.g. a1_b0
+
+    # Key pool
+    total_runs = len(archs) * len(steps_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    results = []
+
+    for arch_name, l, n in archs:
+        for steps in steps_list:
+            for init_idx in range(n_inits):
+                model_key = keys[key_cursor]
+                train_key = keys[key_cursor + 1]
+                key_cursor += 2
+
+                # WF model (F-only input; internal feature construction)
+                WF_model = tm.SobolevModel_WF(
+                    key=model_key,
+                    input_dim=19,            # internal (F, cofF, detF)
+                    output_dim="scalar",
+                    num_hidden_layers=l,
+                    nodes_per_layer=n,
+                    activation=jax.nn.softplus,
+                    is_icnn=True,            # as in your code
+                    is_ficnn=False
+                )
+
+                trained_model, history = tm.train_model(
+                    model=WF_model,
+                    train_data=train_data_WF,
+                    key=train_key,
+                    steps=steps,
+                    batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    loss_fn=loss_fn
+                )
+
+                final_model = klax.finalize(trained_model)
+
+                tag = f"WF_{strategy_tag}_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx+1:02d}"
+                model_path = out_dir / f"{tag}.eqx"
+                hist_path  = out_dir / f"{tag}_history.pkl"
+                meta_path  = out_dir / f"{tag}.json"
+
+                _save_eqx_model(final_model, model_path)
+                _save_history(history, hist_path)
+
+                meta = {
+                    "task": "5.3",
+                    "model_id": "WF",
+                    "tag": tag,
+                    "architecture": {"l": l, "n": n, "activation": "softplus"},
+                    "steps": steps,
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "loss": "WeightedSobolevLoss",
+                    "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
+                    "icnn": {"is_icnn": True, "is_ficnn": False},
+                    "dataset_3": {
+                        "path_h5": dataset_3.get("path_h5", None),
+                        "alpha_scale": float(dataset_3["alpha"]),
+                        "P_max": float(dataset_3["P_max"]),
+                        "n_cal_paths": len(dataset_3["calibration_keys"]),
+                        "n_test_paths": len(dataset_3["test_keys"]),
+                        "calibration_keys": dataset_3["calibration_keys"],
+                        "test_keys": dataset_3["test_keys"],
+                    },
+                    "saved_model_path": str(model_path),
+                    "saved_history_path": str(hist_path),
+                }
+
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+
+                results.append(meta)
+
+    return results
+
+def workflow_task_5_4_train_wf_augmented(
+    dataset_3: dict,
+    *,
+    # Best architecture from Task 5.3 (you will set these after selection)
+    best_l: int = 3,
+    best_n: int = 16,
+    steps: int = 300_000,
+
+    # Augmentation settings
+    observers_list=(8, 16, 32, 64),
+
+    # Repeats / optimization
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+
+    # Loss (default energy-only, matches your snippet)
+    loss_alpha: float = 1.0,
+    loss_beta: float = 0.0,
+
+    # Saving
+    out_dir: str | Path = "artifacts/task5_4",
+
+    # Keys
+    master_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
+    aug_key_seed: int = 1234,
+):
+    """
+    Task 5.4: Train WF model on objectivity-augmented datasets with different numbers of observers.
+
+    For each num_observers in observers_list:
+      1) Augment (F_cal, W_cal, P_cal) using td2.augment_WF_data.
+      2) Duplicate per-sample weights consistent with augmentation layout:
+           augment_WF_data returns [original N] + [rotated num_obs*N]
+         -> weights_aug = concat([weights_cal, tile(weights_cal, num_obs)])
+      3) Train n_inits random initializations of the WF model with the selected architecture.
+      4) Save model + history + metadata.
+
+    Naming:
+      WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX.eqx
+      WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX_history.pkl
+      WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX.json
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Unpack (already scaled + weights aligned to F_cal/W_cal/P_cal)
+    F_cal = dataset_3["F_cal"]
+    W_cal = dataset_3["W_cal"]
+    P_cal = dataset_3["P_cal"]
+    weights_cal = dataset_3["weights_cal"].reshape(-1)
+
+    loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
+    strategy_tag = f"a{loss_alpha:g}_b{loss_beta:g}"
+
+    results = []
+
+    # Keys: need (model_key, train_key) per run
+    total_runs = len(observers_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    for num_obs in observers_list:
+        # -----------------------------------------
+        # 1) Data augmentation (objectivity-based)
+        # augment_WF_data returns:
+        #   F_aug: (N + num_obs*N, 3, 3)
+        #   W_aug: (N + num_obs*N,)
+        #   P_aug: (N + num_obs*N, 3, 3)
+        # with ordering [original, rotated-block]
+        # -----------------------------------------
+        aug_key = jrandom.PRNGKey(aug_key_seed + int(num_obs))
+        F_aug, W_aug, P_aug = td2.augment_WF_data(
+            F_cal, W_cal, P_cal,
+            num_observers=int(num_obs),
+            key=aug_key
+        )
+
+        # -----------------------------------------
+        # 2) Duplicate weights consistently
+        # weights_cal corresponds to original (N,)
+        # Rotated block repeats each original sample once per observer => tile(weights_cal, num_obs)
+        # Final size: (N + num_obs*N,) = (1+num_obs)*N
+        # -----------------------------------------
+        weights_aug = jnp.concatenate(
+            [weights_cal, jnp.tile(weights_cal, (int(num_obs),))],
+            axis=0
+        ).reshape(-1)
+
+        # Sanity check (safe; can remove later)
+        # assert F_aug.shape[0] == weights_aug.shape[0] == W_aug.shape[0] == P_aug.shape[0]
+
+        train_data_WF_aug = (
+            F_aug,
+            ((W_aug, P_aug), weights_aug)
+        )
+
+        # -----------------------------------------
+        # 3) Train n_inits models for this augmented dataset
+        # -----------------------------------------
+        for init_idx in range(n_inits):
+            model_key = keys[key_cursor]
+            train_key = keys[key_cursor + 1]
+            key_cursor += 2
+
+            WF_model = tm.SobolevModel_WF(
+                key=model_key,
+                input_dim=19,               # internal (F, cofF, detF)
+                output_dim="scalar",
+                num_hidden_layers=best_l,
+                nodes_per_layer=best_n,
+                activation=jax.nn.softplus,
+                is_icnn=True,
+                is_ficnn=False
+            )
+
+            trained_model, history = tm.train_model(
+                model=WF_model,
+                train_data=train_data_WF_aug,
+                key=train_key,
+                steps=steps,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                loss_fn=loss_fn
+            )
+
+            final_model = klax.finalize(trained_model)
+
+            tag = f"WF_AUG_obs{int(num_obs)}_{strategy_tag}_l{best_l}_n{best_n}_steps{steps}_init{init_idx+1:02d}"
+            model_path = out_dir / f"{tag}.eqx"
+            hist_path  = out_dir / f"{tag}_history.pkl"
+            meta_path  = out_dir / f"{tag}.json"
+
+            _save_eqx_model(final_model, model_path)
+            _save_history(history, hist_path)
+
+            meta = {
+                "task": "5.4",
+                "model_id": "WF_AUG",
+                "tag": tag,
+                "num_observers": int(num_obs),
+                "augmentation": "td2.augment_WF_data: F->QF, P->QP, W unchanged; concatenates [orig, rotated]",  # see data_t2.py
+                "architecture": {"l": best_l, "n": best_n, "activation": "softplus"},
+                "steps": steps,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "loss": "WeightedSobolevLoss",
+                "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
+                "icnn": {"is_icnn": True, "is_ficnn": False},
+                "dataset_3": {
+                    "path_h5": dataset_3.get("path_h5", None),
+                    "alpha_scale": float(dataset_3["alpha"]),
+                    "P_max": float(dataset_3["P_max"]),
+                    "calibration_keys": dataset_3["calibration_keys"],
+                    "test_keys": dataset_3["test_keys"],
+                    "N_cal_original": int(F_cal.shape[0]),
+                    "N_cal_augmented": int(F_aug.shape[0]),
+                },
+                "saved_model_path": str(model_path),
+                "saved_history_path": str(hist_path),
+            }
+
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+
+            results.append(meta)
+
+    return results
