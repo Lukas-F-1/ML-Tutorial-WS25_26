@@ -1,77 +1,170 @@
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 from . import data_t2 as td2
 import matplotlib.pyplot as plt
 import numpy as np
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping
+from . import eval_workflows as ewf
 
-def evaluate_growth_condition(model, model_type: str, n: int = 100, eps_max: float = 1e-2):
+
+def evaluate_growth_condition(
+    models_or_runs,
+    *,
+    model_type: str,
+    dataset_1: dict | None = None,
+    G_cub=None,
+    n: int = 80,
+    det_min: float = 1e-6,
+    det_max: float = 1.0,
+    include_identity: bool = True,
+    path: str = "uniaxial_compression",  # "uniaxial_compression" or "isotropic"
+    reduce: str = "mean",
+    return_per_init: bool = True,
+    det_max_large: float | None = None,  # e.g. 10.0, 100.0; if None no upper extension
+    n_large: int | None = None,          # optional separate resolution for upper side
+
+):
     """
-    Evaluate how well a model satisfies the growth condition near the identity.
+    Evaluate the growth condition by probing a deformation family with det(F) -> 0^+.
 
-    Parameters
-    ----------
-    model       : trained model object
-    model_type  : "WI", "WI_Cubic", or "WF"
-    n           : number of deformation samples (INCLUDING the identity)
-    eps_max     : maximum perturbation epsilon for the uniaxial-like deformation
+    Generates log-spaced determinants in (det_min, det_max] and constructs F(t) such that det(F)=t.
+    Optionally includes F=I explicitly.
 
-    Returns
-    -------
-    results : list of (F_i, W_i)
-        F_i : (3,3) deformation gradient
-        W_i : scalar predicted energy
+    Returns dict compatible with updated plotting.
     """
-    #Defining Structural Tensors
-    # Transversly isotropic
-    G_ti = jnp.array([[4.0, 0.0, 0.0],
-                    [0.0, 0.5, 0.0],
-                    [0.0, 0.0, 0.5]])
+    # ---- normalize models ----
+    if isinstance(models_or_runs, (ewf.Run,)):
+        models = [models_or_runs.model]
+    elif isinstance(models_or_runs, (list, tuple)) and len(models_or_runs) > 0 and isinstance(models_or_runs[0], ewf.Run):
+        models = [r.model for r in models_or_runs]
+    elif callable(models_or_runs):
+        models = [models_or_runs]
+    elif isinstance(models_or_runs, (list, tuple)) and len(models_or_runs) > 0 and callable(models_or_runs[0]):
+        models = list(models_or_runs)
+    else:
+        raise TypeError("models_or_runs must be a Run, list[Run], model callable, or list of model callables.")
 
-    # Cubic
-    G_cub = td2.G_cub()
+    K = len(models)
 
-    # Linearly spaced epsilons from 0 (identity) to eps_max
-    # jnp.linspace includes both endpoints, so eps=0 is guaranteed.
-    epsilons = jnp.linspace(0.0, eps_max, n)
-
-    results = []
-
-    for eps in epsilons:
-        # Uniaxial-like deformation: stretch in 11-direction
-        F = jnp.array([
-            [1.0 + eps, 0.0, 0.0],
-            [0.0,       1.0, 0.0],
-            [0.0,       0.0, 1.0]
-        ])
-
-        # -------------------------------------------------
-        # Prepare model-specific inputs
-        # -------------------------------------------------
-        if model_type == "WI":
-            # TI invariants (I1, J, -J, I4, I5)
-            I = td2.compute_all_invariants(F=F, G_ti=G_ti)  # shape (5,)
-            model_input = I
-
-        elif model_type == "WI_Cubic":
-            # Cubic invariants (I1, I2, J, -J, I7, I11)
-            I = td2.compute_all_invariants_cubic(F=F,G_cub=G_cub)  # shape (6,)
-            model_input = I
-
-        elif model_type == "WF":
-            # WF model takes F directly; cofF and detF are computed internally
-            model_input = F
-
+    mt = model_type.strip().upper()
+    if mt == "WI":
+        if dataset_1 is not None and "G_ti" in dataset_1:
+            G_ti = dataset_1["G_ti"]
         else:
-            raise ValueError(f"Unknown model_type '{model_type}'.")
+            G_ti = jnp.array([[4.0, 0.0, 0.0],
+                              [0.0, 0.5, 0.0],
+                              [0.0, 0.0, 0.5]])
+    elif mt == "WI_CUBIC":
+        if G_cub is None:
+            G_cub = td2.G_cub()
+    elif mt == "WF":
+        pass
+    else:
+        raise ValueError("model_type must be one of {'WI','WI_Cubic','WF'}.")
 
-        # -------------------------------------------------
-        # Predict W(F)
-        # -------------------------------------------------
-        W_pred, P_pred = model(model_input)
+    # ---- determinants: log-spaced down to det_min ----
+    # We include det_max in the sequence; det_max=1 corresponds to F=I for these paths.
+    # ---- determinants: lower side (det_max -> det_min) log-spaced ----
+    dets_low = jnp.geomspace(det_max, det_min, num=n)
 
-        results.append((F, float(W_pred)))
+    # ---- optional upper side (det_max -> det_max_large) log-spaced ----
+    if det_max_large is not None:
+        if det_max_large <= det_max:
+            raise ValueError(f"det_max_large must be > det_max (got {det_max_large} <= {det_max}).")
+        n_hi = int(n_large) if n_large is not None else int(max(10, n // 2))
+        dets_high = jnp.geomspace(det_max, det_max_large, num=n_hi)
+        # avoid duplicating det_max
+        dets = jnp.concatenate([dets_low, dets_high[1:]], axis=0)
+    else:
+        dets = dets_low
 
-    return results
+    def _F_from_det(d):
+        if path == "uniaxial_compression":
+            # det(F)=d with F=diag(d,1,1)
+            return jnp.array([[d, 0.0, 0.0],
+                              [0.0, 1.0, 0.0],
+                              [0.0, 0.0, 1.0]])
+        elif path == "isotropic":
+            # F = c I, det = c^3 -> c = d^(1/3)
+            c = d ** (1.0 / 3.0)
+            return jnp.array([[c, 0.0, 0.0],
+                              [0.0, c, 0.0],
+                              [0.0, 0.0, c]])
+        else:
+            raise ValueError("path must be 'uniaxial_compression' or 'isotropic'.")
+
+    F_all = jnp.stack([_F_from_det(d) for d in dets], axis=0)  # (n,3,3)
+
+    # Optionally ensure identity is explicitly present
+    # For det_max=1 it already is; but this forces inclusion even if det_max != 1.
+    identity_idx = None
+    if include_identity:
+        F_I = jnp.eye(3)
+        # append F=I if not already essentially included
+        if not (float(det_max) == 1.0):
+            F_all = jnp.concatenate([F_all, F_I[None, :, :]], axis=0)
+            dets = jnp.concatenate([dets, jnp.array([1.0])], axis=0)
+            identity_idx = int(F_all.shape[0] - 1)
+        else:
+            # det_max==1 means first element is F=diag(1,1,1) for both paths
+            identity_idx = 0
+
+    # ---- evaluate W per init ----
+    N = int(F_all.shape[0])
+    W_per_init = np.zeros((K, N), dtype=float)
+
+    for k, model in enumerate(models):
+        vals = []
+        for i in range(N):
+            F = F_all[i]
+
+            if mt == "WI":
+                I = td2.compute_all_invariants(F=F, G_ti=G_ti)
+                out = model((F, I))
+            elif mt == "WI_CUBIC":
+                I = td2.compute_all_invariants_cubic(F=F, G_cub=G_cub)
+                out = model((F, I))
+            else:  # WF
+                out = model(F)
+
+            W_pred = out[0] if (isinstance(out, tuple) and len(out) == 2) else out
+            vals.append(float(jnp.squeeze(W_pred)))
+
+        W_per_init[k, :] = np.array(vals, dtype=float)
+
+    # ---- reduce across inits ----
+    if reduce == "mean":
+        W_red = W_per_init.mean(axis=0)
+    elif reduce == "median":
+        W_red = np.median(W_per_init, axis=0)
+    else:
+        raise ValueError("reduce must be 'mean' or 'median'.")
+
+    W_std = W_per_init.std(axis=0)
+
+    # ---- also compute ||F||_F for plotting convenience ----
+    F_np = np.array(F_all)
+    F_norm = np.linalg.norm(F_np.reshape(N, -1), axis=1)
+
+    result = {
+        "F_all": F_np,
+        "detF": np.array(dets, dtype=float),
+        "F_norm": np.array(F_norm, dtype=float),
+        "W_mean": np.array(W_red, dtype=float),
+        "W_std": np.array(W_std, dtype=float),
+        "n_inits": K,
+        "identity_idx": identity_idx,
+        "path": path,
+    }
+    if return_per_init:
+        result["W_per_init"] = W_per_init
+
+    return result
+
+
 
 
 def evaluate_normalization_condition(model, model_type: str):
@@ -899,6 +992,7 @@ def component_rmse_barplot(
 
     plt.xticks(x, [f"P{c}" for c in comp_labels_flat])
     plt.ylabel("RMSE")
+    plt.yscale("log")
     plt.title(title)
     plt.grid(True, axis="y", linestyle="--", alpha=0.5)
     plt.legend()
@@ -1007,3 +1101,317 @@ def rmse_energy_and_stress_barplots(
     plt.grid(True, axis="y", linestyle="--", alpha=0.5)
     plt.tight_layout()
     plt.show()
+
+
+@dataclass(frozen=True)
+class RMSEReport:
+    """
+    A structured return type so you can keep notebooks clean.
+    """
+    model_name: str
+    model_id: str
+    test_mode: str
+    n_inits: int
+
+    # Stress metrics
+    rmse_P_per_init: np.ndarray          # (K,)
+    rmse_P_mean: float
+    rmse_P_std: float
+
+    rmse_P_comp_per_init: np.ndarray     # (K, 3, 3)
+    rmse_P_comp_mean: np.ndarray         # (3, 3)
+    rmse_P_comp_std: np.ndarray          # (3, 3)
+
+    bias_P_comp_per_init: np.ndarray     # (K, 3, 3)  mean signed error per init
+    bias_P_comp_mean: np.ndarray         # (3, 3)
+    bias_P_comp_std: np.ndarray          # (3, 3)
+
+    # Energy metrics (optional; None if not available)
+    rmse_W_per_init: np.ndarray | None   # (K,) or None
+    rmse_W_mean: float | None
+    rmse_W_std: float | None
+
+    # Optional raw error tensors (can be large)
+    errors_P: np.ndarray | None          # (K, N, 3, 3) or None
+    errors_W: np.ndarray | None          # (K, N) or None
+
+
+def _rmse_scalar(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(x))))
+
+
+def _as_np(x) -> np.ndarray:
+    return np.array(x)
+
+
+def _parse_test_set_any(ts: Any, test_key: str):
+    """
+    Parse a test set from wf.get_test_data_for_run(...) (via ewf.get_test_sets).
+    Supports:
+      - MS/MSW:         (X, Y) where Y is (N,9) or (N,3,3)
+      - WITI/WICUB:     ((F, I), (W, P))
+      - WF/WF_AUG:      (F, (W, P))   OR sometimes ((F, I), (W, P)) depending on your pipeline
+
+    Returns:
+      inputs: tuple to feed into prediction dispatcher
+      W_true: (N,) or None
+      P_true: (N,3,3)
+    """
+    item = ts[test_key]
+
+    # Case A: invariant-style: ((F,I),(W,P))
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+        (F, I), (W, P) = item
+        W_true = jnp.squeeze(W)
+        P_true = P
+        return (F, I), W_true, P_true
+
+    # Case B: deformation-style: (F, (W,P))
+    if isinstance(item, tuple) and len(item) == 2 and not isinstance(item[0], tuple):
+        F = item[0]
+        target = item[1]
+        if isinstance(target, tuple) and len(target) == 2:
+            W, P = target
+            return (F,), jnp.squeeze(W), P
+        # fallback: stress-only target
+        Y = target
+        # Y could be (N,9) or (N,3,3)
+        Y = jnp.array(Y)
+        if Y.ndim == 2 and Y.shape[1] == 9:
+            P_true = Y.reshape(-1, 3, 3)
+        elif Y.ndim == 3 and Y.shape[-2:] == (3, 3):
+            P_true = Y
+        else:
+            raise ValueError(f"Unsupported target shape for test set '{test_key}': {Y.shape}")
+        return (F,), None, P_true
+
+    raise ValueError(f"Unrecognized test-set structure for key='{test_key}': {type(item)} / {item}")
+
+
+def _get_test_mode_keys(test_mode: str) -> list[str]:
+    """
+    test_mode:
+      - "biax"
+      - "mixed"
+      - "full" (biax + mixed, concatenated consistently)
+    """
+    tm = test_mode.lower()
+    if tm == "biax":
+        return ["biax_test"]
+    if tm == "mixed":
+        return ["mixed_test"]
+    if tm == "full":
+        return ["biax_test", "mixed_test"]
+    raise ValueError("test_mode must be one of {'biax','mixed','full'}")
+
+
+def _concat_tests(parsed_list):
+    """
+    parsed_list: list of (inputs_tuple, W_true_or_None, P_true)
+    Concats along N.
+    Works for both:
+      - inputs=(X,) or (F,) or (F,I)
+    """
+    inputs0, W0, P0 = parsed_list[0]
+
+    # concat inputs
+    if len(inputs0) == 1:
+        Xs = [p[0][0] for p in parsed_list]
+        inputs = (jnp.concatenate(Xs, axis=0),)
+    elif len(inputs0) == 2:
+        Fs = [p[0][0] for p in parsed_list]
+        Is = [p[0][1] for p in parsed_list]
+        inputs = (jnp.concatenate(Fs, axis=0), jnp.concatenate(Is, axis=0))
+    else:
+        raise ValueError(f"Unsupported input tuple length: {len(inputs0)}")
+
+    # concat W if available in all parts
+    if all(p[1] is not None for p in parsed_list):
+        Ws = [p[1] for p in parsed_list]
+        W_true = jnp.concatenate(Ws, axis=0)
+    else:
+        W_true = None
+
+    Ps = [p[2] for p in parsed_list]
+    P_true = jnp.concatenate(Ps, axis=0)
+
+    return inputs, W_true, P_true
+
+
+def _predict_WP(model: Any, inputs: tuple[Any, ...]):
+    """
+    Robust prediction wrapper.
+    Returns:
+      W_pred_or_None: (N,) or None
+      P_pred: (N,3,3)
+    """
+    # Stress-only models (MS/MSW etc.) are usually called model(X)->(N,9)
+    if len(inputs) == 1:
+        X = inputs[0]
+        try:
+            # Try stress-only output first: (N,9) or (N,3,3)
+            Y = jax.vmap(model)(X)
+            Y = jnp.array(Y)
+            if Y.ndim == 2 and Y.shape[1] == 9:
+                return None, Y.reshape(-1, 3, 3)
+            if Y.ndim == 3 and Y.shape[-2:] == (3, 3):
+                return None, Y
+            # Otherwise it might be (W,P) tuple per sample: model(F)->(W,P)
+        except Exception:
+            pass
+
+        # Try energy+stress signature: model(F)->(W,P)
+        W, P = jax.vmap(model)(X)
+        return jnp.squeeze(W), P
+
+    # Invariant-based: model((F,I))->(W,P)
+    if len(inputs) == 2:
+        F, I = inputs
+        W, P = jax.vmap(model)((F, I))
+        return jnp.squeeze(W), P
+
+    raise ValueError(f"Unsupported inputs tuple length: {len(inputs)}")
+
+
+def compute_rmse_over_test_set(
+    runs: Iterable[Any],
+    *,
+    dataset_1: dict | None = None,
+    G_cub: jnp.ndarray | None = None,
+    test_mode: str = "full",
+    model_name: str | None = None,
+    return_component_metrics: bool = True,
+    return_raw_errors: bool = False,
+) -> RMSEReport:
+    """
+    Compute RMSE (and signed error/bias) over the chosen test set for a group of runs
+    (typically multiple random initializations of the same base model).
+
+    Parameters
+    ----------
+    runs:
+        Iterable of Run-like objects with at least:
+          - .model_id (str)
+          - .model (callable)
+          - .meta_path (Path)
+          - .tag (str)
+        Typically: list[eval_workflows.Run]
+
+    dataset_1, G_cub:
+        Passed through to ewf.get_test_sets, which delegates to wf.get_test_data_for_run. :contentReference[oaicite:3]{index=3}
+
+    test_mode:
+        "biax", "mixed", or "full" (concatenate biax+mixed).
+
+    return_component_metrics:
+        If True, compute per-component RMSE (3x3) and bias (mean signed error).
+
+    return_raw_errors:
+        If True, return the raw error tensors:
+           errors_P: (K,N,3,3) and errors_W: (K,N)
+        This can be large; keep False unless you need histograms/parity later.
+
+    Returns
+    -------
+    RMSEReport
+    """
+    runs = list(runs)
+    if not runs:
+        raise ValueError("compute_rmse_over_test_set received an empty runs iterable.")
+
+    # Determine model_id/name from first run
+    r0 = runs[0]
+    mid = str(getattr(r0, "model_id", "")).upper()
+    if model_name is None:
+        model_name = getattr(r0, "base_tag", None) or getattr(r0, "tag", "model")
+
+    # --- Build test set once, using run0 meta (consistent with your workflow style) ---
+    ts = ewf.get_test_sets(r0, dataset_1=dataset_1, G_cub=G_cub)  # :contentReference[oaicite:4]{index=4}
+    keys = _get_test_mode_keys(test_mode)
+
+    parsed = [_parse_test_set_any(ts, k) for k in keys]
+    if len(parsed) == 1:
+        inputs, W_true, P_true = parsed[0]
+    else:
+        inputs, W_true, P_true = _concat_tests(parsed)
+
+    P_true_np = _as_np(P_true)  # (N,3,3)
+    W_true_np = _as_np(W_true) if W_true is not None else None
+
+    # --- Predict per init ---
+    P_errs = []
+    W_errs = []
+
+    for r in runs:
+        W_pred, P_pred = _predict_WP(r.model, inputs)
+        P_pred_np = _as_np(P_pred)
+
+        # Stress errors
+        P_err = P_pred_np - P_true_np   # (N,3,3)
+        P_errs.append(P_err)
+
+        # Energy errors (if available on both sides)
+        if W_true_np is not None and W_pred is not None:
+            W_pred_np = np.squeeze(_as_np(W_pred))
+            W_errs.append(W_pred_np - np.squeeze(W_true_np))
+
+    P_errs = np.stack(P_errs, axis=0)  # (K,N,3,3)
+    K = P_errs.shape[0]
+
+    # --- Global stress RMSE per init (scalar over all entries) ---
+    rmse_P_per_init = np.sqrt(np.mean(P_errs**2, axis=(1, 2, 3)))  # (K,)
+    rmse_P_mean = float(np.mean(rmse_P_per_init))
+    rmse_P_std  = float(np.std(rmse_P_per_init))
+
+    # --- Component metrics ---
+    if return_component_metrics:
+        rmse_P_comp_per_init = np.sqrt(np.mean(P_errs**2, axis=1))      # (K,3,3)
+        rmse_P_comp_mean = np.mean(rmse_P_comp_per_init, axis=0)        # (3,3)
+        rmse_P_comp_std  = np.std(rmse_P_comp_per_init, axis=0)         # (3,3)
+
+        bias_P_comp_per_init = np.mean(P_errs, axis=1)                  # (K,3,3)
+        bias_P_comp_mean = np.mean(bias_P_comp_per_init, axis=0)        # (3,3)
+        bias_P_comp_std  = np.std(bias_P_comp_per_init, axis=0)         # (3,3)
+    else:
+        rmse_P_comp_per_init = np.zeros((K, 3, 3))
+        rmse_P_comp_mean = np.zeros((3, 3))
+        rmse_P_comp_std = np.zeros((3, 3))
+        bias_P_comp_per_init = np.zeros((K, 3, 3))
+        bias_P_comp_mean = np.zeros((3, 3))
+        bias_P_comp_std = np.zeros((3, 3))
+
+    # --- Energy RMSE (optional) ---
+    if W_true_np is not None and len(W_errs) == K:
+        W_errs = np.stack(W_errs, axis=0)  # (K,N)
+        rmse_W_per_init = np.sqrt(np.mean(W_errs**2, axis=1))  # (K,)
+        rmse_W_mean = float(np.mean(rmse_W_per_init))
+        rmse_W_std  = float(np.std(rmse_W_per_init))
+        errors_W_out = W_errs if return_raw_errors else None
+    else:
+        rmse_W_per_init = None
+        rmse_W_mean = None
+        rmse_W_std = None
+        errors_W_out = None
+
+    errors_P_out = P_errs if return_raw_errors else None
+
+    return RMSEReport(
+        model_name=str(model_name),
+        model_id=mid,
+        test_mode=test_mode,
+        n_inits=K,
+        rmse_P_per_init=rmse_P_per_init,
+        rmse_P_mean=rmse_P_mean,
+        rmse_P_std=rmse_P_std,
+        rmse_P_comp_per_init=rmse_P_comp_per_init,
+        rmse_P_comp_mean=rmse_P_comp_mean,
+        rmse_P_comp_std=rmse_P_comp_std,
+        bias_P_comp_per_init=bias_P_comp_per_init,
+        bias_P_comp_mean=bias_P_comp_mean,
+        bias_P_comp_std=bias_P_comp_std,
+        rmse_W_per_init=rmse_W_per_init,
+        rmse_W_mean=rmse_W_mean,
+        rmse_W_std=rmse_W_std,
+        errors_P=errors_P_out,
+        errors_W=errors_W_out,
+    )
