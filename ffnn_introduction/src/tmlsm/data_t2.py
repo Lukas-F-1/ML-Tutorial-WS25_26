@@ -6,6 +6,7 @@ from jaxtyping import Float, Array
 import numpy as np
 import os
 import pandas as pd
+import h5py
 
 def load_hyperelastic_data(filepath):
   """
@@ -566,44 +567,64 @@ def prepare_PANN_split(
     return train_data, test_data, train_idx, test_idx
 
 
-
 def load_multiscale_paths(path):
     """
-    Loads CPShub multiscale dataset and returns a list of deformation paths.
-
-    Returns
-    -------
-    F_paths : list of arrays, each (T_i, 3, 3)
-    P_paths : list of arrays, each (T_i, 3, 3)
-    W_paths : list of arrays, each (T_i,)
-    J_paths : list of arrays, each (T_i,)
-    mode_names : list of strings
+    Loads CPShub multiscale dataset using h5py (no pytables needed).
+    Handles Pandas HDFStore block format with varying column sets.
     """
-    store = pd.HDFStore(path, "r")
-    keys = store.keys()
-
     F_paths = []
     P_paths = []
     W_paths = []
     J_paths = []
     mode_names = []
 
-    for key in keys:
-        df = store[key]
+    with h5py.File(path, "r") as f:
+        for run_key in f.keys():
+            run_group = f[run_key]
+            
+            for load_path_key in run_group.keys():
+                group = run_group[load_path_key]
+                
+                # Spaltennamen aus block0_items lesen
+                col_names = [s.decode('utf-8') for s in group['block0_items'][:]]
+                values = group['block0_values'][:]
+                
+                # Spalten-Index-Mapping
+                col_idx = {name: i for i, name in enumerate(col_names)}
+                
+                n_samples = values.shape[0]
+                
+                # F-Tensor: Identität als Basis, dann überschreiben was vorhanden ist
+                F = np.eye(3)[None, :, :].repeat(n_samples, axis=0)  # (n, 3, 3) Identitäten
+                for i, ii in enumerate([1, 2, 3]):
+                    for j, jj in enumerate([1, 2, 3]):
+                        key = f"F{ii}{jj}"
+                        if key in col_idx:
+                            F[:, i, j] = values[:, col_idx[key]]
+                
+                # P-Tensor: lese was vorhanden ist
+                P = np.zeros((n_samples, 3, 3))
+                for i, ii in enumerate([1, 2, 3]):
+                    for j, jj in enumerate([1, 2, 3]):
+                        key = f"P{ii}{jj}"
+                        if key in col_idx:
+                            P[:, i, j] = values[:, col_idx[key]]
+                
+                # Skalare
+                W = values[:, col_idx["StrEn"]]
+                
+                # J: aus Datei lesen oder aus F berechnen
+                if "J" in col_idx:
+                    J = values[:, col_idx["J"]]
+                else:
+                    J = np.linalg.det(F)
 
-        # Extract data
-        F = df[[f"F{i}{j}" for i in [1,2,3] for j in [1,2,3]]].values.reshape(-1, 3, 3)
-        P = df[[f"P{i}{j}" for i in [1,2,3] for j in [1,2,3]]].values.reshape(-1, 3, 3)
-        W = df["StrEn"].values
-        J = df["J"].values
+                F_paths.append(jnp.array(F))
+                P_paths.append(jnp.array(P))
+                W_paths.append(jnp.array(W))
+                J_paths.append(jnp.array(J))
+                mode_names.append(f"{run_key}/{load_path_key}")
 
-        F_paths.append(jnp.array(F))
-        P_paths.append(jnp.array(P))
-        W_paths.append(jnp.array(W))
-        J_paths.append(jnp.array(J))
-        mode_names.append(key)
-
-    store.close()
     return F_paths, P_paths, W_paths, J_paths, mode_names
 
 def G_cub():
