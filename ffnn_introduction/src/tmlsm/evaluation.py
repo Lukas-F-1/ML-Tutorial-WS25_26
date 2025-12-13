@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 from . import eval_workflows as ewf
 import re
+import matplotlib.ticker as mticker
+from matplotlib.transforms import blended_transform_factory
+
+
 
 def evaluate_growth_condition(
     models_or_runs,
@@ -933,8 +937,6 @@ def rmse_energy_and_stress_barplots(
     fig.tight_layout()
     plt.show()
 
-
-
 @dataclass(frozen=True)
 class RMSEReport:
     """
@@ -948,22 +950,24 @@ class RMSEReport:
     # Stress metrics
     rmse_P_per_init: np.ndarray          # (K,)
     rmse_P_mean: float
+    rmse_P_median: float                # NEW
     rmse_P_std: float
 
     rmse_P_comp_per_init: np.ndarray     # (K, 3, 3)
     rmse_P_comp_mean: np.ndarray         # (3, 3)
     rmse_P_comp_std: np.ndarray          # (3, 3)
 
-    bias_P_comp_per_init: np.ndarray     # (K, 3, 3)  mean signed error per init
+    bias_P_comp_per_init: np.ndarray     # (K, 3, 3)
     bias_P_comp_mean: np.ndarray         # (3, 3)
     bias_P_comp_std: np.ndarray          # (3, 3)
 
     # Energy metrics (optional; None if not available)
     rmse_W_per_init: np.ndarray | None   # (K,) or None
     rmse_W_mean: float | None
+    rmse_W_median: float | None          # NEW
     rmse_W_std: float | None
 
-    # Optional raw error tensors (can be large)
+    # Optional raw error tensors
     errors_P: np.ndarray | None          # (K, N, 3, 3) or None
     errors_W: np.ndarray | None          # (K, N) or None
 
@@ -1115,50 +1119,16 @@ def compute_rmse_over_test_set(
     return_component_metrics: bool = True,
     return_raw_errors: bool = False,
 ) -> RMSEReport:
-    """
-    Compute RMSE (and signed error/bias) over the chosen test set for a group of runs
-    (typically multiple random initializations of the same base model).
-
-    Parameters
-    ----------
-    runs:
-        Iterable of Run-like objects with at least:
-          - .model_id (str)
-          - .model (callable)
-          - .meta_path (Path)
-          - .tag (str)
-        Typically: list[eval_workflows.Run]
-
-    dataset_1, G_cub:
-        Passed through to ewf.get_test_sets, which delegates to wf.get_test_data_for_run. :contentReference[oaicite:3]{index=3}
-
-    test_mode:
-        "biax", "mixed", or "full" (concatenate biax+mixed).
-
-    return_component_metrics:
-        If True, compute per-component RMSE (3x3) and bias (mean signed error).
-
-    return_raw_errors:
-        If True, return the raw error tensors:
-           errors_P: (K,N,3,3) and errors_W: (K,N)
-        This can be large; keep False unless you need histograms/parity later.
-
-    Returns
-    -------
-    RMSEReport
-    """
     runs = list(runs)
     if not runs:
         raise ValueError("compute_rmse_over_test_set received an empty runs iterable.")
 
-    # Determine model_id/name from first run
     r0 = runs[0]
     mid = str(getattr(r0, "model_id", "")).upper()
     if model_name is None:
         model_name = getattr(r0, "base_tag", None) or getattr(r0, "tag", "model")
 
-    # --- Build test set once, using run0 meta (consistent with your workflow style) ---
-    ts = ewf.get_test_sets(r0, dataset_1=dataset_1, G_cub=G_cub)  # :contentReference[oaicite:4]{index=4}
+    ts = ewf.get_test_sets(r0, dataset_1=dataset_1, G_cub=G_cub)
     keys = _get_test_mode_keys(test_mode)
 
     parsed = [_parse_test_set_any(ts, k) for k in keys]
@@ -1178,11 +1148,9 @@ def compute_rmse_over_test_set(
         W_pred, P_pred = _predict_WP(r.model, inputs)
         P_pred_np = _as_np(P_pred)
 
-        # Stress errors
         P_err = P_pred_np - P_true_np   # (N,3,3)
         P_errs.append(P_err)
 
-        # Energy errors (if available on both sides)
         if W_true_np is not None and W_pred is not None:
             W_pred_np = np.squeeze(_as_np(W_pred))
             W_errs.append(W_pred_np - np.squeeze(W_true_np))
@@ -1190,10 +1158,11 @@ def compute_rmse_over_test_set(
     P_errs = np.stack(P_errs, axis=0)  # (K,N,3,3)
     K = P_errs.shape[0]
 
-    # --- Global stress RMSE per init (scalar over all entries) ---
+    # --- Global stress RMSE per init ---
     rmse_P_per_init = np.sqrt(np.mean(P_errs**2, axis=(1, 2, 3)))  # (K,)
-    rmse_P_mean = float(np.mean(rmse_P_per_init))
-    rmse_P_std  = float(np.std(rmse_P_per_init))
+    rmse_P_mean   = float(np.mean(rmse_P_per_init))
+    rmse_P_median = float(np.median(rmse_P_per_init))              # NEW
+    rmse_P_std    = float(np.std(rmse_P_per_init))
 
     # --- Component metrics ---
     if return_component_metrics:
@@ -1216,12 +1185,14 @@ def compute_rmse_over_test_set(
     if W_true_np is not None and len(W_errs) == K:
         W_errs = np.stack(W_errs, axis=0)  # (K,N)
         rmse_W_per_init = np.sqrt(np.mean(W_errs**2, axis=1))  # (K,)
-        rmse_W_mean = float(np.mean(rmse_W_per_init))
-        rmse_W_std  = float(np.std(rmse_W_per_init))
+        rmse_W_mean   = float(np.mean(rmse_W_per_init))
+        rmse_W_median = float(np.median(rmse_W_per_init))      # NEW
+        rmse_W_std    = float(np.std(rmse_W_per_init))
         errors_W_out = W_errs if return_raw_errors else None
     else:
         rmse_W_per_init = None
         rmse_W_mean = None
+        rmse_W_median = None   # NEW
         rmse_W_std = None
         errors_W_out = None
 
@@ -1234,6 +1205,7 @@ def compute_rmse_over_test_set(
         n_inits=K,
         rmse_P_per_init=rmse_P_per_init,
         rmse_P_mean=rmse_P_mean,
+        rmse_P_median=rmse_P_median,     # NEW
         rmse_P_std=rmse_P_std,
         rmse_P_comp_per_init=rmse_P_comp_per_init,
         rmse_P_comp_mean=rmse_P_comp_mean,
@@ -1243,10 +1215,107 @@ def compute_rmse_over_test_set(
         bias_P_comp_std=bias_P_comp_std,
         rmse_W_per_init=rmse_W_per_init,
         rmse_W_mean=rmse_W_mean,
+        rmse_W_median=rmse_W_median,     # NEW
         rmse_W_std=rmse_W_std,
         errors_P=errors_P_out,
         errors_W=errors_W_out,
     )
+
+def select_best_per_size(
+    reports: dict,
+    *,
+    criterion: str = "median",   # "median" or "mean"
+    metric: str = "P",           # "P" (stress) or "W" (energy)
+    sizes=("small", "medium", "large"),
+) -> dict:
+    """
+    From a dict[name -> RMSEReport] that contains multiple variants per size
+    (e.g., steps sweeps), return dict[size -> (name, report)] for the best one.
+    """
+    criterion = criterion.lower().strip()
+    metric = metric.upper().strip()
+    if criterion not in ("median", "mean"):
+        raise ValueError("criterion must be 'median' or 'mean'.")
+    if metric not in ("P", "W"):
+        raise ValueError("metric must be 'P' or 'W'.")
+
+    def score(rep):
+        if metric == "P":
+            return rep.rmse_P_median if criterion == "median" else rep.rmse_P_mean
+        else:
+            # Energy might be None for some runs
+            val = rep.rmse_W_median if criterion == "median" else rep.rmse_W_mean
+            return np.inf if val is None else float(val)
+
+    winners = {}
+    for size in sizes:
+        # filter all entries belonging to this size
+        candidates = [(name, rep) for name, rep in reports.items() if size in name]
+        if not candidates:
+            continue
+        winners[size] = min(candidates, key=lambda nr: score(nr[1]))  # (name, report)
+
+    return winners
+
+import matplotlib.pyplot as plt
+
+def plot_best_sizes_mean_median(
+    winners: dict,
+    *,
+    metric: str = "P",
+    title: str | None = None,
+    logy: bool = True,
+    figsize=(8.5, 4.8),
+):
+    """
+    winners: dict[size -> (name, RMSEReport)] as returned by select_best_per_size().
+    """
+    metric = metric.upper().strip()
+    if metric not in ("P", "W"):
+        raise ValueError("metric must be 'P' or 'W'.")
+
+    # keep consistent ordering if present
+    order = [s for s in ("small", "medium", "large") if s in winners]
+    labels = []
+    means = []
+    meds = []
+
+    for s in order:
+        name, rep = winners[s]
+        if metric == "P":
+            means.append(rep.rmse_P_mean)
+            meds.append(rep.rmse_P_median)
+            ylabel = "RMSE (Stress P)"
+            if title is None:
+                title = "Best per architecture: Stress RMSE mean vs median (over inits)"
+        else:
+            means.append(np.nan if rep.rmse_W_mean is None else rep.rmse_W_mean)
+            meds.append(np.nan if rep.rmse_W_median is None else rep.rmse_W_median)
+            ylabel = "RMSE (Energy W)"
+            if title is None:
+                title = "Best per architecture: Energy RMSE mean vs median (over inits)"
+
+        # label includes which variant won (e.g., steps)
+        labels.append(f"{s}\n{short_run_label(name, multiline=True)}")
+
+    x = np.arange(len(order))
+    width = 0.38
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.bar(x - width/2, means, width=width, label="mean", alpha=0.85)
+    ax.bar(x + width/2, meds,  width=width, label="median", alpha=0.85)
+
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8)
+    if logy:
+        ax.set_yscale("log")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
 
 def _steps_to_k(steps: int) -> str:
     if steps >= 1_000_000:
@@ -1330,3 +1399,800 @@ def short_run_label(name: str, *, multiline: bool = True) -> str:
         parts.append(avg_flag)
 
     return "\n".join(parts) if multiline else " ".join(parts)
+
+def compare_two_run_groups_mean_median_barplot(
+    group_a_runs,
+    group_b_runs,
+    *,
+    name_a: str,
+    name_b: str,
+    dataset_1=None,
+    test_mode: str = "full",
+    metric: str = "P",         # "P" (stress) or "W" (energy)
+    logy: bool = True,
+    title: str | None = None,
+    figsize=(7.8, 4.6),
+):
+    """
+    Compute RMSEReport for two groups (each group = list of inits) and plot mean vs median.
+
+    Parameters
+    ----------
+    group_a_runs, group_b_runs:
+        Iterables of Run objects (same model type per group), typically one per init.
+
+    name_a, name_b:
+        Labels used for the plot x-axis.
+
+    dataset_1, test_mode:
+        Passed to compute_rmse_over_test_set so both groups use consistent test logic.
+
+    metric:
+        "P" for stress RMSE, "W" for energy RMSE (if available).
+
+    Returns
+    -------
+    (rep_a, rep_b)
+    """
+    rep_a = compute_rmse_over_test_set(
+        list(group_a_runs),
+        dataset_1=dataset_1,
+        test_mode=test_mode,
+        model_name=name_a,
+    )
+    rep_b = compute_rmse_over_test_set(
+        list(group_b_runs),
+        dataset_1=dataset_1,
+        test_mode=test_mode,
+        model_name=name_b,
+    )
+
+    metric = metric.upper().strip()
+    if metric == "P":
+        means = [rep_a.rmse_P_mean, rep_b.rmse_P_mean]
+        meds  = [rep_a.rmse_P_median, rep_b.rmse_P_median]
+        ylabel = "RMSE (Stress P)"
+        if title is None:
+            title = "Task 2.3 vs Task 2.2: Stress RMSE mean vs median (over inits)"
+    elif metric == "W":
+        means = [
+            np.nan if rep_a.rmse_W_mean is None else rep_a.rmse_W_mean,
+            np.nan if rep_b.rmse_W_mean is None else rep_b.rmse_W_mean,
+        ]
+        meds = [
+            np.nan if rep_a.rmse_W_median is None else rep_a.rmse_W_median,
+            np.nan if rep_b.rmse_W_median is None else rep_b.rmse_W_median,
+        ]
+        ylabel = "RMSE (Energy W)"
+        if title is None:
+            title = "Task 2.3 vs Task 2.2: Energy RMSE mean vs median (over inits)"
+    else:
+        raise ValueError("metric must be 'P' or 'W'.")
+
+    # Plot
+    xlabels = [short_run_label(name_a, multiline=True), short_run_label(name_b, multiline=True)]
+    x = np.arange(2)
+    width = 0.38
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.bar(x - width/2, means, width=width, label="mean", alpha=0.85)
+    ax.bar(x + width/2, meds,  width=width, label="median", alpha=0.85)
+
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(xlabels, fontsize=8)
+
+    if logy:
+        ax.set_yscale("log")
+
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+    return rep_a, rep_b
+
+def _arch_bucket_from_cfg_name(name: str) -> str:
+    # name like "WITI_l3_n16_steps300000"
+    m = re.search(r"_l(\d+)_n(\d+)_", name)
+    if not m:
+        return "other"
+    l, n = int(m.group(1)), int(m.group(2))
+    if (l, n) == (2, 8):
+        return "small"
+    if (l, n) == (3, 16):
+        return "medium"
+    if (l, n) == (4, 32):
+        return "large"
+    return f"l{l}_n{n}"
+
+def select_best_per_arch_bucket(
+    reports: dict[str, "RMSEReport"],
+    *,
+    metric: str = "P",          # "P" or "W"
+    criterion: str = "median",  # "median" or "mean"
+) -> dict[str, tuple[str, "RMSEReport"]]:
+    metric = metric.upper().strip()
+    criterion = criterion.lower().strip()
+    assert metric in ("P", "W")
+    assert criterion in ("median", "mean")
+
+    def score(rep):
+        if metric == "P":
+            return rep.rmse_P_median if criterion == "median" else rep.rmse_P_mean
+        else:
+            v = rep.rmse_W_median if criterion == "median" else rep.rmse_W_mean
+            return float("inf") if v is None else float(v)
+
+    buckets: dict[str, list[tuple[str, "RMSEReport"]]] = {}
+    for name, rep in reports.items():
+        b = _arch_bucket_from_cfg_name(name)
+        buckets.setdefault(b, []).append((name, rep))
+
+    winners = {}
+    for b, items in buckets.items():
+        if b == "other":
+            continue
+        winners[b] = min(items, key=lambda nr: score(nr[1]))  # (name, report)
+
+    return winners
+
+def get_train_witi_from_dataset_1(dataset_1: dict):
+    """
+    Reconstruct the exact calibration/training set used by Task 3 WITI workflows.
+    Returns ((F_train, I_train), (W_train, P_train)).
+    """
+    F_train = jnp.concatenate([dataset_1["F_bi"],  dataset_1["F_uni"],  dataset_1["F_ps"]], axis=0)
+    I_train = jnp.concatenate([dataset_1["I_bi"],  dataset_1["I_uni"],  dataset_1["I_ps"]], axis=0)
+    W_train = jnp.concatenate([dataset_1["W_bi"],  dataset_1["W_uni"],  dataset_1["W_ps"]], axis=0)
+    P_train = jnp.concatenate([dataset_1["P_bi"],  dataset_1["P_uni"],  dataset_1["P_ps"]], axis=0)
+    return (F_train, I_train), (W_train, P_train)
+
+def parity_plot_train_vs_test_witi(
+    run, *,
+    dataset_1: dict,
+    test_which: str = "full",      # "mixed", "biax", "full"
+    target: str = "W",             # "W" or "P"
+    p_comp: tuple[int,int] = (0,0),# used if target="P"
+    alpha: float = 0.35,
+    s: float = 10.0,
+    title: str | None = None,
+    figsize=(6.5, 6.0),
+):
+    """
+    Parity plot: x=true, y=pred. Training points vs test points in different colors.
+    """
+    # --- train set (calibration) ---
+    (F_tr, I_tr), (W_tr, P_tr) = get_train_witi_from_dataset_1(dataset_1)
+
+    # --- test set ---
+    (F_te, I_te), (W_te, P_te) = ewf.get_test_witi(run, dataset_1=dataset_1, which=test_which)
+
+    # --- predict ---
+    Wp_tr, Pp_tr = jax.vmap(run.model)((F_tr, I_tr))
+    Wp_te, Pp_te = jax.vmap(run.model)((F_te, I_te))
+
+    Wp_tr = jnp.squeeze(Wp_tr); Wp_te = jnp.squeeze(Wp_te)
+
+    # --- select scalar to plot ---
+    if target.upper() == "W":
+        x_tr = np.asarray(W_tr).reshape(-1)
+        y_tr = np.asarray(Wp_tr).reshape(-1)
+        x_te = np.asarray(W_te).reshape(-1)
+        y_te = np.asarray(Wp_te).reshape(-1)
+        ylabel = "Predicted W"
+        xlabel = "True W"
+        if title is None:
+            title = f"WITI parity (W): train vs test ({test_which})"
+    else:
+        i, j = p_comp
+        x_tr = np.asarray(P_tr[:, i, j]).reshape(-1)
+        y_tr = np.asarray(Pp_tr[:, i, j]).reshape(-1)
+        x_te = np.asarray(P_te[:, i, j]).reshape(-1)
+        y_te = np.asarray(Pp_te[:, i, j]).reshape(-1)
+        ylabel = f"Predicted P[{i+1}{j+1}]"
+        xlabel = f"True P[{i+1}{j+1}]"
+        if title is None:
+            title = f"WITI parity (P[{i+1}{j+1}]): train vs test ({test_which})"
+
+    # --- plot ---
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.scatter(x_tr, y_tr, s=s, alpha=alpha, label="train (calibration)")
+    ax.scatter(x_te, y_te, s=s, alpha=alpha, label="test")
+
+    # y=x reference
+    lo = min(np.min(x_tr), np.min(x_te), np.min(y_tr), np.min(y_te))
+    hi = max(np.max(x_tr), np.max(x_te), np.max(y_tr), np.max(y_te))
+    ax.plot([lo, hi], [lo, hi], linewidth=1.0)
+
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+def pick_median_init_run(
+    runs: list,
+    *,
+    dataset_1: dict,
+    test_mode: str = "full",
+) -> "Run":
+    """
+    Pick the run whose stress-RMSE is the median among inits (on the chosen test set).
+    """
+    rep = eval.compute_rmse_over_test_set(
+        runs,
+        dataset_1=dataset_1,
+        test_mode=test_mode,
+        model_name="tmp",
+    )
+    rmse = np.asarray(rep.rmse_P_per_init)
+    k = int(np.argsort(rmse)[len(rmse)//2])
+    return list(runs)[k]
+
+def get_train_witi_from_dataset_1(dataset_1):
+    F_tr = jnp.concatenate(
+        [dataset_1["F_bi"], dataset_1["F_uni"], dataset_1["F_ps"]], axis=0
+    )
+    I_tr = jnp.concatenate(
+        [dataset_1["I_bi"], dataset_1["I_uni"], dataset_1["I_ps"]], axis=0
+    )
+    W_tr = jnp.concatenate(
+        [dataset_1["W_bi"], dataset_1["W_uni"], dataset_1["W_ps"]], axis=0
+    )
+    P_tr = jnp.concatenate(
+        [dataset_1["P_bi"], dataset_1["P_uni"], dataset_1["P_ps"]], axis=0
+    )
+    return (F_tr, I_tr), (W_tr, P_tr)
+
+def plot_task3_section2_train_test_rmse_vs_steps(
+    *,
+    art_dir: str,
+    dataset_1: dict,
+    metric: str = "P",                 # "P" or "W"
+    agg: str = "median",               # "median" or "mean" over inits
+    figsize=(9.0, 8.5),
+):
+    """
+    Task 3 Section 2 diagnostic plot (Option A):
+      1) Training RMSE vs steps
+      2) Test RMSE (biax) vs steps
+      3) Test RMSE (mixed) vs steps
+
+    - 3 panels share x-axis
+    - log y-scale
+    - SAME y-limits across all panels for visual comparability
+    - red dotted horizontal line at the minimum RMSE in each panel
+    """
+
+    metric = metric.upper().strip()
+    if metric not in ("P", "W"):
+        raise ValueError("metric must be 'P' or 'W'.")
+
+    agg = agg.lower().strip()
+    if agg not in ("median", "mean"):
+        raise ValueError("agg must be 'median' or 'mean'.")
+
+    # ----------------------------
+    # Load runs
+    # ----------------------------
+    runs = ewf.load_runs(art_dir, model_id="WITI", dataset_1=dataset_1, strict=False)
+    if not runs:
+        raise FileNotFoundError(f"No WITI runs found in {art_dir}")
+
+    # ----------------------------
+    # Group runs by (l, n, steps)
+    # ----------------------------
+    def cfg_key(r):
+        m = re.search(r"_l(\d+)_n(\d+)_steps(\d+)", r.tag)
+        if not m:
+            return None
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+    groups = ewf.group_runs(runs, by=cfg_key)
+    groups.pop(None, None)
+
+    # ----------------------------
+    # Architecture labels (by (l,n))
+    # ----------------------------
+    arch_map = {(2, 8): "S", (3, 16): "M", (4, 32): "L"}
+    arch_order = ["S", "M", "L"]
+    colors = {"S": "C0", "M": "C1", "L": "C2"}
+
+    # ----------------------------
+    # Build train set + both test sets once
+    # ----------------------------
+    (F_tr, I_tr), (W_tr, P_tr) = get_train_witi_from_dataset_1(dataset_1)
+
+    any_run = runs[0]
+    (F_bx, I_bx), (W_bx, P_bx) = ewf.get_test_witi(any_run, dataset_1=dataset_1, which="biax")
+    (F_mx, I_mx), (W_mx, P_mx) = ewf.get_test_witi(any_run, dataset_1=dataset_1, which="mixed")
+
+    # ----------------------------
+    # Compute RMSE curves: per arch, per steps, per panel
+    # ----------------------------
+    # data[arch]["steps"] = [...]
+    # data[arch]["train"] = [...]
+    # data[arch]["biax"]  = [...]
+    # data[arch]["mixed"] = [...]
+    data = {a: {"steps": [], "train": [], "biax": [], "mixed": []} for a in arch_order}
+
+    def _rmse_from_preds(Wp, Pp, W_true, P_true):
+        if metric == "P":
+            err = np.asarray(Pp - P_true)  # (N,3,3)
+            return float(np.sqrt(np.mean(err**2)))
+        else:
+            err = np.asarray(jnp.squeeze(Wp) - jnp.squeeze(W_true))  # (N,)
+            return float(np.sqrt(np.mean(err**2)))
+
+    def _aggregate(vals):
+        vals = np.asarray(vals, dtype=float)
+        return float(np.median(vals)) if agg == "median" else float(np.mean(vals))
+
+    for (l, n, steps), cfg_runs in groups.items():
+        arch = arch_map.get((l, n))
+        if arch is None:
+            continue
+
+        rmse_tr_inits = []
+        rmse_bx_inits = []
+        rmse_mx_inits = []
+
+        for r in cfg_runs:
+            # train
+            Wp_tr, Pp_tr = jax.vmap(r.model)((F_tr, I_tr))
+            rmse_tr_inits.append(_rmse_from_preds(Wp_tr, Pp_tr, W_tr, P_tr))
+
+            # test biax
+            Wp_bx, Pp_bx = jax.vmap(r.model)((F_bx, I_bx))
+            rmse_bx_inits.append(_rmse_from_preds(Wp_bx, Pp_bx, W_bx, P_bx))
+
+            # test mixed
+            Wp_mx, Pp_mx = jax.vmap(r.model)((F_mx, I_mx))
+            rmse_mx_inits.append(_rmse_from_preds(Wp_mx, Pp_mx, W_mx, P_mx))
+
+        data[arch]["steps"].append(int(steps))
+        data[arch]["train"].append(_aggregate(rmse_tr_inits))
+        data[arch]["biax"].append(_aggregate(rmse_bx_inits))
+        data[arch]["mixed"].append(_aggregate(rmse_mx_inits))
+
+    # ----------------------------
+    # Determine common y-limits across ALL panels and curves
+    # ----------------------------
+    all_y = []
+    for arch in arch_order:
+        for k in ("train", "biax", "mixed"):
+            all_y.extend(list(data[arch][k]))
+    all_y = np.asarray(all_y, dtype=float)
+    all_y = all_y[np.isfinite(all_y) & (all_y > 0)]
+    if all_y.size == 0:
+        raise RuntimeError("No RMSE values computed (check parsing/grouping).")
+
+    # log-safe padding
+    ymin = float(np.min(all_y) / 1.15)
+    ymax = float(np.max(all_y) * 1.15)
+
+    # panel-specific minima (for red dotted lines)
+    def _panel_min(panel_key: str) -> float:
+        vals = []
+        for arch in arch_order:
+            vals.extend(list(data[arch][panel_key]))
+        vals = np.asarray(vals, dtype=float)
+        vals = vals[np.isfinite(vals) & (vals > 0)]
+        return float(np.min(vals))
+
+    best_train = _panel_min("train")
+    best_biax  = _panel_min("biax")
+    best_mixed = _panel_min("mixed")
+
+    # ----------------------------
+    # Plot (3 aligned panels)
+    # ----------------------------
+    fig, (ax_tr, ax_bx, ax_mx) = plt.subplots(
+        3, 1, sharex=True, figsize=figsize, gridspec_kw={"hspace": 0.05}
+    )
+
+    for arch in arch_order:
+        steps = np.asarray(data[arch]["steps"], dtype=int)
+        order = np.argsort(steps)
+        steps_k = steps[order] / 1000.0
+
+        y_tr = np.asarray(data[arch]["train"], dtype=float)[order]
+        y_bx = np.asarray(data[arch]["biax"],  dtype=float)[order]
+        y_mx = np.asarray(data[arch]["mixed"], dtype=float)[order]
+
+        ax_tr.plot(steps_k, y_tr, marker="o", color=colors[arch], label=arch)
+        ax_bx.plot(steps_k, y_bx, marker="o", color=colors[arch], label=arch)
+        ax_mx.plot(steps_k, y_mx, marker="o", color=colors[arch], label=arch)
+
+    # red dotted min lines per panel
+    ax_tr.axhline(best_train, linestyle=":", color="red", linewidth=1.5)
+    ax_bx.axhline(best_biax,  linestyle=":", color="red", linewidth=1.5)
+    ax_mx.axhline(best_mixed, linestyle=":", color="red", linewidth=1.5)
+
+    # common formatting
+    title_metric = "P-RMSE" if metric == "P" else "W-RMSE"
+    agg_txt = "median" if agg == "median" else "mean"
+
+    ax_tr.set_title(f"Task 3 Section 2 — {title_metric} vs training steps ({agg_txt} over inits)")
+
+    for ax, ylabel in zip(
+        (ax_tr, ax_bx, ax_mx),
+        ("Training RMSE", "Test RMSE (biax)", "Test RMSE (mixed)"),
+    ):
+        ax.set_yscale("log")
+        ax.set_ylim(ymin, ymax)   # keep shared scale (this part was good)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, which="both", linestyle="--", alpha=0.4)
+
+        # keep dense ticks, but no special labels
+        _apply_dense_log_ticks(ax)
+
+
+
+
+    ax_mx.set_xlabel("Training steps [k]")
+
+    # one legend (top panel)
+    ax_tr.legend(title="Architecture")
+
+    fig.tight_layout()
+    plt.show()
+
+
+def get_train_witi_from_dataset_1(dataset_1: dict):
+    """
+    Reconstruct the exact calibration/training set used by Task 3 WITI workflows.
+    Returns ((F_train, I_train), (W_train, P_train)).
+    """
+    F_train = jnp.concatenate([dataset_1["F_bi"],  dataset_1["F_uni"],  dataset_1["F_ps"]], axis=0)
+    I_train = jnp.concatenate([dataset_1["I_bi"],  dataset_1["I_uni"],  dataset_1["I_ps"]], axis=0)
+    W_train = jnp.concatenate([dataset_1["W_bi"],  dataset_1["W_uni"],  dataset_1["W_ps"]], axis=0)
+    P_train = jnp.concatenate([dataset_1["P_bi"],  dataset_1["P_uni"],  dataset_1["P_ps"]], axis=0)
+    return (F_train, I_train), (W_train, P_train)
+
+def _apply_dense_log_ticks(ax):
+    """
+    Make log axis show more tick labels and minor ticks (2..9 per decade).
+    """
+    ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, numticks=12))
+    ax.yaxis.set_minor_locator(mticker.LogLocator(base=10.0, subs=np.arange(2, 10), numticks=100))
+    ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+
+    # Formatter to show labels like 2×10^-2 (instead of only 10^k)
+    ax.yaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10.0))
+    ax.tick_params(axis="y", which="major", length=6)
+    ax.tick_params(axis="y", which="minor", length=3)
+
+def get_train_ms_from_dataset_1(dataset_1: dict):
+    """
+    Reconstruct the exact calibration/training set used by Task 2.2 MS workflows.
+
+    Training order in workflow_task_2_2_train_ms_sweep:
+      C_cal_MS = [C_uni, C_ps, C_bi]
+      P_cal_MS = [P_uni, P_ps, P_bi]
+    Then X = vmap(C_to_six)(C_cal_MS), Y = reshape(P_cal_MS)->(N,9)
+    """
+    C_cal = jnp.concatenate([dataset_1["C_uni"], dataset_1["C_ps"], dataset_1["C_bi"]], axis=0)
+    P_cal = jnp.concatenate([dataset_1["P_uni"], dataset_1["P_ps"], dataset_1["P_bi"]], axis=0)
+
+    X_train = jax.vmap(td2.C_to_six)(C_cal)                 # (N,6)
+    Y_train = P_cal.reshape(P_cal.shape[0], 9)              # (N,9)
+    return X_train, Y_train
+
+def plot_task2_2_train_test_rmse_vs_steps(
+    *,
+    art_dir: str,
+    dataset_1: dict,
+    agg: str = "median",          # "median" or "mean" across inits
+    figsize=(9.0, 8.0),
+):
+    """
+    Task 2.2 diagnostic plot (3 panels):
+      1) Training RMSE vs steps  (calibration set: uni + pure_shear + biax)
+      2) Test RMSE (biax) vs steps
+      3) Test RMSE (mixed) vs steps
+
+    - architectures: S/M/L (from run.arch_name or tag prefix)
+    - x-axis: steps [k]
+    - log y-scale
+    - same y-limits across panels
+    - red dotted line at per-panel minimum (no labels)
+    """
+
+    agg = agg.lower().strip()
+    if agg not in ("median", "mean"):
+        raise ValueError("agg must be 'median' or 'mean'.")
+
+    # ----------------------------
+    # Load runs (MS only)
+    # ----------------------------
+    runs = ewf.load_runs(art_dir, model_id="MS", dataset_1=dataset_1, strict=False)
+    if not runs:
+        raise FileNotFoundError(f"No MS runs found in {art_dir}")
+
+    # ----------------------------
+    # Build train set and both test sets once
+    # ----------------------------
+    X_tr, Y_tr = get_train_ms_from_dataset_1(dataset_1)
+
+    any_run = runs[0]
+    X_bx, Y_bx = ewf.get_test_ms(any_run, dataset_1=dataset_1, which="biax")   # (N,6),(N,9)
+    X_mx, Y_mx = ewf.get_test_ms(any_run, dataset_1=dataset_1, which="mixed")  # (N,6),(N,9)
+
+    # ----------------------------
+    # Group runs by (arch, steps)
+    # ----------------------------
+    def _arch_from_run(r):
+        # prefer meta-derived field if present
+        a = getattr(r, "arch_name", None)
+        if a:
+            return str(a).lower()
+        # fallback: parse tag "MS_small_..."
+        for s in ("small", "medium", "large"):
+            if f"MS_{s}_" in r.tag:
+                return s
+        return None
+
+    def cfg_key(r):
+        arch = _arch_from_run(r)
+        steps = int(getattr(r, "steps", -1) or -1)
+        if steps < 0:
+            m = re.search(r"_steps(\d+)", r.tag)
+            steps = int(m.group(1)) if m else -1
+        if arch is None or steps < 0:
+            return None
+        return (arch, steps)
+
+    groups = ewf.group_runs(runs, by=cfg_key)
+    groups.pop(None, None)
+
+    arch_order = ["small", "medium", "large"]
+    arch_label = {"small": "S", "medium": "M", "large": "L"}
+    colors = {"small": "C0", "medium": "C1", "large": "C2"}
+
+    # ----------------------------
+    # Compute RMSE per (arch, steps), aggregated over inits
+    # ----------------------------
+    data = {a: {"steps": [], "train": [], "biax": [], "mixed": []} for a in arch_order}
+
+    def _rmse(Y_pred, Y_true):
+        err = np.asarray(Y_pred - Y_true)   # (N,9)
+        return float(np.sqrt(np.mean(err**2)))
+
+    def _aggregate(vals):
+        vals = np.asarray(vals, dtype=float)
+        return float(np.median(vals)) if agg == "median" else float(np.mean(vals))
+
+    for (arch, steps), cfg_runs in groups.items():
+        if arch not in data:
+            continue
+
+        rmse_tr_inits = []
+        rmse_bx_inits = []
+        rmse_mx_inits = []
+
+        for r in cfg_runs:
+            # fastest/consistent: call the model directly
+            Yp_tr = jax.vmap(r.model)(X_tr)   # (N,9)
+            Yp_bx = jax.vmap(r.model)(X_bx)
+            Yp_mx = jax.vmap(r.model)(X_mx)
+
+            rmse_tr_inits.append(_rmse(Yp_tr, Y_tr))
+            rmse_bx_inits.append(_rmse(Yp_bx, Y_bx))
+            rmse_mx_inits.append(_rmse(Yp_mx, Y_mx))
+
+        data[arch]["steps"].append(int(steps))
+        data[arch]["train"].append(_aggregate(rmse_tr_inits))
+        data[arch]["biax"].append(_aggregate(rmse_bx_inits))
+        data[arch]["mixed"].append(_aggregate(rmse_mx_inits))
+
+    # ----------------------------
+    # Shared y-limits across all panels
+    # ----------------------------
+    all_y = []
+    for arch in arch_order:
+        all_y.extend(data[arch]["train"])
+        all_y.extend(data[arch]["biax"])
+        all_y.extend(data[arch]["mixed"])
+
+    all_y = np.asarray(all_y, dtype=float)
+    all_y = all_y[np.isfinite(all_y) & (all_y > 0)]
+    if all_y.size == 0:
+        raise RuntimeError("No RMSE values computed. Check grouping/tag parsing.")
+
+    ymin = float(np.min(all_y) / 1.15)
+    ymax = float(np.max(all_y) * 1.15)
+
+    def _panel_min(key):
+        vals = []
+        for arch in arch_order:
+            vals.extend(data[arch][key])
+        vals = np.asarray(vals, dtype=float)
+        vals = vals[np.isfinite(vals) & (vals > 0)]
+        return float(np.min(vals))
+
+    best_train = _panel_min("train")
+    best_biax  = _panel_min("biax")
+    best_mixed = _panel_min("mixed")
+
+    # ----------------------------
+    # Plot: 3 aligned panels
+    # ----------------------------
+    fig, (ax_tr, ax_bx, ax_mx) = plt.subplots(
+        3, 1, sharex=True, figsize=figsize, gridspec_kw={"hspace": 0.05}
+    )
+
+    for arch in arch_order:
+        steps = np.asarray(data[arch]["steps"], dtype=int)
+        order = np.argsort(steps)
+        steps_k = steps[order] / 1000.0
+
+        y_tr = np.asarray(data[arch]["train"], dtype=float)[order]
+        y_bx = np.asarray(data[arch]["biax"], dtype=float)[order]
+        y_mx = np.asarray(data[arch]["mixed"], dtype=float)[order]
+
+        ax_tr.plot(steps_k, y_tr, marker="o", color=colors[arch], label=arch_label[arch])
+        ax_bx.plot(steps_k, y_bx, marker="o", color=colors[arch], label=arch_label[arch])
+        ax_mx.plot(steps_k, y_mx, marker="o", color=colors[arch], label=arch_label[arch])
+
+    # Red dotted minima per panel (no labels)
+    ax_tr.axhline(best_train, linestyle=":", color="red", linewidth=1.5)
+    ax_bx.axhline(best_biax,  linestyle=":", color="red", linewidth=1.5)
+    ax_mx.axhline(best_mixed, linestyle=":", color="red", linewidth=1.5)
+
+    # Formatting
+    title_agg = "median" if agg == "median" else "mean"
+    ax_tr.set_title(f"Task 2.2 — MS P-RMSE vs training steps ({title_agg} over inits)")
+
+    for ax, ylabel in zip(
+        (ax_tr, ax_bx, ax_mx),
+        ("Training RMSE", "Test RMSE (biax)", "Test RMSE (mixed)"),
+    ):
+        ax.set_yscale("log")
+        ax.set_ylim(ymin, ymax)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, which="both", linestyle="--", alpha=0.4)
+
+    ax_mx.set_xlabel("Training steps [k]")
+    ax_tr.legend(title="Architecture")
+
+    fig.tight_layout()
+    plt.show()
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_P_component_mirrored_density_grid(
+    P_true: np.ndarray,
+    P_pred_list,
+    *,
+    title: str = "",
+    bins: int = 80,
+    clip_percentiles=(0.5, 99.5),
+    cmap: str = "viridis",
+):
+    """
+    3x3 grid. Each cell is split into two vertical halves:
+      left  = density of TRUE values for that P_ij component
+      right = density of PRED values for that component
+
+    The visualization in each cell is a heatmap over (value-bin, {true,pred}),
+    i.e. a (bins x 2) image. Each column is normalized to sum to 1.
+
+    Parameters
+    ----------
+    P_true : (N,3,3)
+    P_pred_list :
+        either list of K arrays each (N,3,3) or array (K,N,3,3) or (N,3,3).
+        We aggregate over inits by stacking all predicted values.
+    bins : number of y-bins
+    clip_percentiles : robust range per component based on combined true+pred values
+    """
+
+    P_true = np.asarray(P_true)
+    if P_true.ndim != 3 or P_true.shape[1:] != (3, 3):
+        raise ValueError("P_true must have shape (N,3,3).")
+
+    # Normalize P_pred input
+    if isinstance(P_pred_list, list):
+        P_pred = np.stack([np.asarray(p) for p in P_pred_list], axis=0)  # (K,N,3,3)
+    else:
+        P_pred = np.asarray(P_pred_list)
+        if P_pred.ndim == 3:
+            P_pred = P_pred[None, ...]  # (1,N,3,3)
+    if P_pred.ndim != 4 or P_pred.shape[2:] != (3, 3):
+        raise ValueError("P_pred_list must be list[(N,3,3)] or array (K,N,3,3) or (N,3,3).")
+
+    # Precompute global vmax for consistent color scale within the figure
+    # (since columns are normalized, values are in [0,1])
+    H_all = []
+    for i in range(3):
+        for j in range(3):
+            tvals = P_true[:, i, j].reshape(-1)
+            pvals = P_pred[:, :, i, j].reshape(-1)  # aggregate across inits
+
+            lo, hi = np.percentile(np.concatenate([tvals, pvals]), clip_percentiles)
+            if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+                # fallback: expand slightly
+                m = np.nanmedian(np.concatenate([tvals, pvals]))
+                lo, hi = m - 1.0, m + 1.0
+
+            # hist counts
+            ct, edges = np.histogram(tvals, bins=bins, range=(lo, hi))
+            cp, _     = np.histogram(pvals, bins=bins, range=(lo, hi))
+
+            # normalize per column
+            ct = ct.astype(float)
+            cp = cp.astype(float)
+            ct = ct / ct.sum() if ct.sum() > 0 else ct
+            cp = cp / cp.sum() if cp.sum() > 0 else cp
+
+            H = np.stack([ct, cp], axis=1)  # (bins,2)
+            H_all.append(H)
+
+    vmax = float(np.max(H_all)) if H_all else 1.0
+    if vmax <= 0 or not np.isfinite(vmax):
+        vmax = 1.0
+
+    # Plot grid
+    fig, axes = plt.subplots(3, 3, figsize=(10.5, 10.0), sharey=False)
+    fig.suptitle(title, fontsize=14)
+
+    im_for_cbar = None
+    for i in range(3):
+        for j in range(3):
+            ax = axes[i, j]
+
+            tvals = P_true[:, i, j].reshape(-1)
+            pvals = P_pred[:, :, i, j].reshape(-1)
+
+            lo, hi = np.percentile(np.concatenate([tvals, pvals]), clip_percentiles)
+            if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+                m = np.nanmedian(np.concatenate([tvals, pvals]))
+                lo, hi = m - 1.0, m + 1.0
+
+            ct, edges = np.histogram(tvals, bins=bins, range=(lo, hi))
+            cp, _     = np.histogram(pvals, bins=bins, range=(lo, hi))
+
+            ct = ct.astype(float); cp = cp.astype(float)
+            ct = ct / ct.sum() if ct.sum() > 0 else ct
+            cp = cp / cp.sum() if cp.sum() > 0 else cp
+            H = np.stack([ct, cp], axis=1)  # (bins,2)
+
+            # show as (y-bins x 2-columns) heatmap
+            im = ax.imshow(
+                H,
+                origin="lower",
+                aspect="auto",
+                extent=(0, 2, edges[0], edges[-1]),
+                vmin=0.0,
+                vmax=vmax,
+                cmap=cmap,
+            )
+            im_for_cbar = im
+
+            # Subplot labels
+            ax.set_title(f"P{i+1}{j+1}", fontsize=10)
+            ax.set_xlim(0, 2)
+            ax.set_xticks([0.5, 1.5])
+            ax.set_xticklabels(["true", "pred"], fontsize=9)
+
+            # vertical split line
+            ax.axvline(1.0, color="white", linewidth=1.0, alpha=0.9)
+
+            # reduce clutter
+            if j != 0:
+                ax.set_yticklabels([])
+            else:
+                ax.tick_params(axis="y", labelsize=9)
+
+    # Single shared colorbar
+    cbar = fig.colorbar(im_for_cbar, ax=axes.ravel().tolist(), shrink=0.9, pad=0.02)
+    cbar.set_label("Normalized frequency (per column)", rotation=90)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.show()
