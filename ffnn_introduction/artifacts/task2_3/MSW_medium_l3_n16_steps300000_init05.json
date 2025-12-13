@@ -8,6 +8,8 @@
   "nodes_per_layer": 16,
   "activation": "softplus",
   "steps": 300000,
+  "init_idx": 5,
+  "n_inits": null,
   "batch_size": 32,
   "learning_rate": 0.001,
   "loss": "WeightedMSE",
@@ -19,6 +21,7 @@
     "w_ps_inv": 0.03335082530975342,
     "w_bi_inv": 0.01400909572839737
   },
+  "base_seed": 1327077,
   "saved_model_path": "artifacts\\task2_3\\MSW_medium_l3_n16_steps300000_init05.eqx",
   "saved_history_path": "artifacts\\task2_3\\MSW_medium_l3_n16_steps300000_init05_history.pkl"
 }

@@ -1716,174 +1716,174 @@ def workflow_task_5_3_sweep_wf(
 
     return results
 
-def workflow_task_5_4_train_wf_augmented(
-    dataset_3: dict,
-    *,
-    # Best architecture from Task 5.3 (you will set these after selection)
-    best_l: int = 3,
-    best_n: int = 16,
-    steps: int = 300_000,
+# def workflow_task_5_4_train_wf_augmented(
+#     dataset_3: dict,
+#     *,
+#     # Best architecture from Task 5.3 (you will set these after selection)
+#     best_l: int = 3,
+#     best_n: int = 16,
+#     steps: int = 300_000,
 
-    # Augmentation settings
-    observers_list=(8, 16, 32, 64),
+#     # Augmentation settings
+#     observers_list=(8, 16, 32, 64),
 
-    # Repeats / optimization
-    n_inits: int = 5,
-    batch_size: int = 32,
-    learning_rate: float = 1e-3,
+#     # Repeats / optimization
+#     n_inits: int = 5,
+#     batch_size: int = 32,
+#     learning_rate: float = 1e-3,
 
-    # Loss (default energy-only, matches your snippet)
-    loss_alpha: float = 1.0,
-    loss_beta: float = 0.0,
+#     # Loss (default energy-only, matches your snippet)
+#     loss_alpha: float = 1.0,
+#     loss_beta: float = 0.0,
 
-    # Saving
-    out_dir: str | Path = "artifacts/task5_4",
+#     # Saving
+#     out_dir: str | Path = "artifacts/task5_4",
 
-    # Keys
-    master_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
-    aug_key_seed: int = 1234,
-):
-    """
-    Task 5.4: Train WF model on objectivity-augmented datasets with different numbers of observers.
+#     # Keys
+#     master_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
+#     aug_key_seed: int = 1234,
+# ):
+#     """
+#     Task 5.4: Train WF model on objectivity-augmented datasets with different numbers of observers.
 
-    For each num_observers in observers_list:
-      1) Augment (F_cal, W_cal, P_cal) using td2.augment_WF_data.
-      2) Duplicate per-sample weights consistent with augmentation layout:
-           augment_WF_data returns [original N] + [rotated num_obs*N]
-         -> weights_aug = concat([weights_cal, tile(weights_cal, num_obs)])
-      3) Train n_inits random initializations of the WF model with the selected architecture.
-      4) Save model + history + metadata.
+#     For each num_observers in observers_list:
+#       1) Augment (F_cal, W_cal, P_cal) using td2.augment_WF_data.
+#       2) Duplicate per-sample weights consistent with augmentation layout:
+#            augment_WF_data returns [original N] + [rotated num_obs*N]
+#          -> weights_aug = concat([weights_cal, tile(weights_cal, num_obs)])
+#       3) Train n_inits random initializations of the WF model with the selected architecture.
+#       4) Save model + history + metadata.
 
-    Naming:
-      WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX.eqx
-      WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX_history.pkl
-      WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX.json
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+#     Naming:
+#       WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX.eqx
+#       WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX_history.pkl
+#       WF_AUG_obs{num_obs}_l{l}_n{n}_steps{steps}_initXX.json
+#     """
+#     out_dir = Path(out_dir)
+#     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Unpack (already scaled + weights aligned to F_cal/W_cal/P_cal)
-    F_cal = dataset_3["F_cal"]
-    W_cal = dataset_3["W_cal"]
-    P_cal = dataset_3["P_cal"]
-    weights_cal = dataset_3["weights_cal"].reshape(-1)
+#     # Unpack (already scaled + weights aligned to F_cal/W_cal/P_cal)
+#     F_cal = dataset_3["F_cal"]
+#     W_cal = dataset_3["W_cal"]
+#     P_cal = dataset_3["P_cal"]
+#     weights_cal = dataset_3["weights_cal"].reshape(-1)
 
-    loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
-    strategy_tag = f"a{loss_alpha:g}_b{loss_beta:g}"
+#     loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
+#     strategy_tag = f"a{loss_alpha:g}_b{loss_beta:g}"
 
-    results = []
+#     results = []
 
-    # Keys: need (model_key, train_key) per run
-    total_runs = len(observers_list) * n_inits
-    keys = jrandom.split(master_key, total_runs * 2 + 1)
-    key_cursor = 1
+#     # Keys: need (model_key, train_key) per run
+#     total_runs = len(observers_list) * n_inits
+#     keys = jrandom.split(master_key, total_runs * 2 + 1)
+#     key_cursor = 1
 
-    for num_obs in observers_list:
-        # -----------------------------------------
-        # 1) Data augmentation (objectivity-based)
-        # augment_WF_data returns:
-        #   F_aug: (N + num_obs*N, 3, 3)
-        #   W_aug: (N + num_obs*N,)
-        #   P_aug: (N + num_obs*N, 3, 3)
-        # with ordering [original, rotated-block]
-        # -----------------------------------------
-        aug_key = jrandom.PRNGKey(aug_key_seed + int(num_obs))
-        F_aug, W_aug, P_aug = td2.augment_WF_data(
-            F_cal, W_cal, P_cal,
-            num_observers=int(num_obs),
-            key=aug_key
-        )
+#     for num_obs in observers_list:
+#         # -----------------------------------------
+#         # 1) Data augmentation (objectivity-based)
+#         # augment_WF_data returns:
+#         #   F_aug: (N + num_obs*N, 3, 3)
+#         #   W_aug: (N + num_obs*N,)
+#         #   P_aug: (N + num_obs*N, 3, 3)
+#         # with ordering [original, rotated-block]
+#         # -----------------------------------------
+#         aug_key = jrandom.PRNGKey(aug_key_seed + int(num_obs))
+#         F_aug, W_aug, P_aug = td2.augment_WF_data(
+#             F_cal, W_cal, P_cal,
+#             num_observers=int(num_obs),
+#             key=aug_key
+#         )
 
-        # -----------------------------------------
-        # 2) Duplicate weights consistently
-        # weights_cal corresponds to original (N,)
-        # Rotated block repeats each original sample once per observer => tile(weights_cal, num_obs)
-        # Final size: (N + num_obs*N,) = (1+num_obs)*N
-        # -----------------------------------------
-        weights_aug = jnp.concatenate(
-            [weights_cal, jnp.tile(weights_cal, (int(num_obs),))],
-            axis=0
-        ).reshape(-1)
+#         # -----------------------------------------
+#         # 2) Duplicate weights consistently
+#         # weights_cal corresponds to original (N,)
+#         # Rotated block repeats each original sample once per observer => tile(weights_cal, num_obs)
+#         # Final size: (N + num_obs*N,) = (1+num_obs)*N
+#         # -----------------------------------------
+#         weights_aug = jnp.concatenate(
+#             [weights_cal, jnp.tile(weights_cal, (int(num_obs),))],
+#             axis=0
+#         ).reshape(-1)
 
-        # Sanity check (safe; can remove later)
-        # assert F_aug.shape[0] == weights_aug.shape[0] == W_aug.shape[0] == P_aug.shape[0]
+#         # Sanity check (safe; can remove later)
+#         # assert F_aug.shape[0] == weights_aug.shape[0] == W_aug.shape[0] == P_aug.shape[0]
 
-        train_data_WF_aug = (
-            F_aug,
-            ((W_aug, P_aug), weights_aug)
-        )
+#         train_data_WF_aug = (
+#             F_aug,
+#             ((W_aug, P_aug), weights_aug)
+#         )
 
-        # -----------------------------------------
-        # 3) Train n_inits models for this augmented dataset
-        # -----------------------------------------
-        for init_idx in range(n_inits):
-            model_key = keys[key_cursor]
-            train_key = keys[key_cursor + 1]
-            key_cursor += 2
+#         # -----------------------------------------
+#         # 3) Train n_inits models for this augmented dataset
+#         # -----------------------------------------
+#         for init_idx in range(n_inits):
+#             model_key = keys[key_cursor]
+#             train_key = keys[key_cursor + 1]
+#             key_cursor += 2
 
-            WF_model = tm.SobolevModel_WF(
-                key=model_key,
-                input_dim=19,               # internal (F, cofF, detF)
-                output_dim="scalar",
-                num_hidden_layers=best_l,
-                nodes_per_layer=best_n,
-                activation=jax.nn.softplus,
-                is_icnn=True,
-                is_ficnn=False
-            )
+#             WF_model = tm.SobolevModel_WF(
+#                 key=model_key,
+#                 input_dim=19,               # internal (F, cofF, detF)
+#                 output_dim="scalar",
+#                 num_hidden_layers=best_l,
+#                 nodes_per_layer=best_n,
+#                 activation=jax.nn.softplus,
+#                 is_icnn=True,
+#                 is_ficnn=False
+#             )
 
-            trained_model, history = tm.train_model(
-                model=WF_model,
-                train_data=train_data_WF_aug,
-                key=train_key,
-                steps=steps,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
-                loss_fn=loss_fn
-            )
+#             trained_model, history = tm.train_model(
+#                 model=WF_model,
+#                 train_data=train_data_WF_aug,
+#                 key=train_key,
+#                 steps=steps,
+#                 batch_size=batch_size,
+#                 learning_rate=learning_rate,
+#                 loss_fn=loss_fn
+#             )
 
-            final_model = klax.finalize(trained_model)
+#             final_model = klax.finalize(trained_model)
 
-            tag = f"WF_AUG_obs{int(num_obs)}_{strategy_tag}_l{best_l}_n{best_n}_steps{steps}_init{init_idx+1:02d}"
-            model_path = out_dir / f"{tag}.eqx"
-            hist_path  = out_dir / f"{tag}_history.pkl"
-            meta_path  = out_dir / f"{tag}.json"
+#             tag = f"WF_AUG_obs{int(num_obs)}_{strategy_tag}_l{best_l}_n{best_n}_steps{steps}_init{init_idx+1:02d}"
+#             model_path = out_dir / f"{tag}.eqx"
+#             hist_path  = out_dir / f"{tag}_history.pkl"
+#             meta_path  = out_dir / f"{tag}.json"
 
-            _save_eqx_model(final_model, model_path)
-            _save_history(history, hist_path)
+#             _save_eqx_model(final_model, model_path)
+#             _save_history(history, hist_path)
 
-            meta = {
-                "task": "5.4",
-                "model_id": "WF_AUG",
-                "tag": tag,
-                "num_observers": int(num_obs),
-                "augmentation": "td2.augment_WF_data: F->QF, P->QP, W unchanged; concatenates [orig, rotated]",  # see data_t2.py
-                "architecture": {"l": best_l, "n": best_n, "activation": "softplus"},
-                "steps": steps,
-                "batch_size": batch_size,
-                "learning_rate": learning_rate,
-                "loss": "WeightedSobolevLoss",
-                "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
-                "icnn": {"is_icnn": True, "is_ficnn": False},
-                "dataset_3": {
-                    "path_h5": dataset_3.get("path_h5", None),
-                    "alpha_scale": float(dataset_3["alpha"]),
-                    "P_max": float(dataset_3["P_max"]),
-                    "calibration_keys": dataset_3["calibration_keys"],
-                    "test_keys": dataset_3["test_keys"],
-                    "N_cal_original": int(F_cal.shape[0]),
-                    "N_cal_augmented": int(F_aug.shape[0]),
-                },
-                "saved_model_path": str(model_path),
-                "saved_history_path": str(hist_path),
-            }
+#             meta = {
+#                 "task": "5.4",
+#                 "model_id": "WF_AUG",
+#                 "tag": tag,
+#                 "num_observers": int(num_obs),
+#                 "augmentation": "td2.augment_WF_data: F->QF, P->QP, W unchanged; concatenates [orig, rotated]",  # see data_t2.py
+#                 "architecture": {"l": best_l, "n": best_n, "activation": "softplus"},
+#                 "steps": steps,
+#                 "batch_size": batch_size,
+#                 "learning_rate": learning_rate,
+#                 "loss": "WeightedSobolevLoss",
+#                 "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
+#                 "icnn": {"is_icnn": True, "is_ficnn": False},
+#                 "dataset_3": {
+#                     "path_h5": dataset_3.get("path_h5", None),
+#                     "alpha_scale": float(dataset_3["alpha"]),
+#                     "P_max": float(dataset_3["P_max"]),
+#                     "calibration_keys": dataset_3["calibration_keys"],
+#                     "test_keys": dataset_3["test_keys"],
+#                     "N_cal_original": int(F_cal.shape[0]),
+#                     "N_cal_augmented": int(F_aug.shape[0]),
+#                 },
+#                 "saved_model_path": str(model_path),
+#                 "saved_history_path": str(hist_path),
+#             }
 
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
+#             with open(meta_path, "w", encoding="utf-8") as f:
+#                 json.dump(meta, f, indent=2)
 
-            results.append(meta)
+#             results.append(meta)
 
-    return results
+#     return results
 
 
 #------------------------Workflows Model Evaluation
@@ -3850,6 +3850,26 @@ def workflow_task_5_3_sweep_wf(
 
     return results
 
+def _build_augmented_wf_dataset(F_base, W_base, P_base, weights_base, *, observers, key_seed):
+    """
+    Build augmented WF dataset using td2.augment_WF_data.
+    """
+    aug_key = jrandom.PRNGKey(key_seed + observers)
+    F_aug, W_aug, P_aug = td2.augment_WF_data(
+        F_base, W_base, P_base,
+        num_observers=observers,
+        key=aug_key
+    )
+    
+    # Weights: original + tiled for rotated copies
+    weights_aug = jnp.concatenate(
+        [weights_base, jnp.tile(weights_base, (observers,))],
+        axis=0
+    ).reshape(-1)
+    
+    return F_aug, W_aug, P_aug, weights_aug
+
+
 def _run_single_task5_4_wf_augmented(exp):
     """
     One training run for Task 5.4:
@@ -4037,7 +4057,7 @@ def workflow_task_5_4_train_wf_augmented(
 
     for obs in observers_list:
         # --- build augmented dataset exactly like serial workflow ---
-        F_aug, W_aug, P_aug, weights_aug = wf._build_augmented_wf_dataset(  # noqa: F821
+        F_aug, W_aug, P_aug, weights_aug = _build_augmented_wf_dataset(  # noqa: F821
             F_base,
             W_base,
             P_base,

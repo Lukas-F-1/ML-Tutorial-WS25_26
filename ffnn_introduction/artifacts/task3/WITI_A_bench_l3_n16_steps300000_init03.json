@@ -9,6 +9,7 @@
     "activation": "softplus"
   },
   "steps": 300000,
+  "init_idx": 3,
   "batch_size": 32,
   "learning_rate": 0.001,
   "loss": "WeightedSobolevLoss",
@@ -27,5 +28,6 @@
     "concat_order": "[biaxial, uniaxial, pure_shear]"
   },
   "saved_model_path": "artifacts\\task3\\WITI_A_bench_l3_n16_steps300000_init03.eqx",
-  "saved_history_path": "artifacts\\task3\\WITI_A_bench_l3_n16_steps300000_init03_history.pkl"
+  "saved_history_path": "artifacts\\task3\\WITI_A_bench_l3_n16_steps300000_init03_history.pkl",
+  "base_seed": 42
 }

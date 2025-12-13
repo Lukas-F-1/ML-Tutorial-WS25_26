@@ -15,15 +15,6 @@
     "beta": 1.0
   },
   "loss_weighting": "inverse path weights (uniaxial, pure shear, biaxial)",
-  "path_weights": {
-    "w_uni": 51.73220443725586,
-    "w_ps": 29.98426628112793,
-    "w_bi": 71.38219451904297,
-    "w_uni_inv": 0.01933031901717186,
-    "w_ps_inv": 0.03335082530975342,
-    "w_bi_inv": 0.01400909572839737,
-    "concat_order": "[biaxial, uniaxial, pure_shear]"
-  },
   "saved_model_path": "artifacts\\task3_section2\\WITI_C_small_l2_n8_steps100000_init01.eqx",
   "saved_history_path": "artifacts\\task3_section2\\WITI_C_small_l2_n8_steps100000_init01_history.pkl"
 }
