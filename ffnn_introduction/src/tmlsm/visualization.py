@@ -1040,47 +1040,397 @@ def plot_stress_stretch_comparison(pred_dict, F_true, P_true, component_indices=
 
     fig.show()
 
-def plt_growth_cond(results, model_name="Model"):
+def plt_growth_cond(
+    results,
+    model_name: str = "Model",
+    *,
+    x_axis: str = "detF",             # "F_norm", "eps", "detF"
+    log_x: bool = True,
+    log_y: bool = True,
+
+    show_mean: bool = True,
+    show_std_band: bool = True,
+    show_inits: bool = False,
+    alpha_inits: float = 0.25,
+    marker_mean: bool = False,
+    mark_identity: bool = True,
+
+    # --- calibration overlay ---
+    overlay_calibration: bool = False,
+    calibration_provider=None,         # callable(label, res)-> dict with {"detF_cal":(M,), "W_cal":(M,)}
+    calibration_mode: str = "hexbin",  # "hexbin" or "subsample_scatter"
+    calibration_alpha: float = 0.18,
+    calibration_marker_size: int = 26,
+    calibration_color: str = "0.25",
+    calibration_mincnt: int = 5,
+    calibration_gridsize: int = 50,
+    calibration_subsample: int = 1000,
+    extend_det_to_calibration_max: bool = True,
+
+    # --- broken-axis controls ---
+    broken_y: bool = True,
+    y_low_max: float = 1e3,            # upper limit of lower panel
+    y_high_min: float = 1e6,           # lower limit of upper panel
+    y_high_pad: float = 1.25,          # pad factor for top y-limit
+
+    # choose x-range for upper panel based on where all curves exceed y_high_min
+    use_auto_x_for_upper: bool = True,
+    x_upper_min: float | None = None,  # if set, overrides auto
+):
     """
-    Plot growth condition evaluation results.
-    
-    Parameters:
-        results     : list of tuples (F, W) where 
-                        F is a (3,3) deformation gradient
-                        W is the predicted energy scalar
-        model_name  : name of the model (for the plot title)
+    Multi-model growth condition plot.
+
+    Key improvements:
+      - calibration overlay is drawn ONCE (not per model)
+      - optional broken Y axis to avoid squashing low-energy behavior
+      - identity markers match line colors
     """
-    
-    # Extract Frobenius norms and energies
-    F_norms = []
-    W_vals = []
-    
-    for F, W in results:
-        frob = jnp.linalg.norm(F)          # Frobenius norm
-        F_norms.append(float(frob))
-        W_vals.append(float(W))
-    
-    # Convert to arrays for consistent plotting
-    F_norms = jnp.array(F_norms)
-    W_vals = jnp.array(W_vals)
-    
-    # Sort by X for smooth-looking curves
-    idx = jnp.argsort(F_norms)
-    F_norms = F_norms[idx]
-    W_vals = W_vals[idx]
-    
-    # Create plot
-    plt.figure(figsize=(7,5))
-    plt.plot(F_norms, W_vals, "o-", markersize=4, label=model_name)
-    
-    plt.xlabel(r"$\|F\|_F$ (Frobenius norm of deformation gradient)")
-    plt.ylabel(r"$W(F)$ (Predicted Energy)")
-    plt.title(f"Growth Condition Evaluation - {model_name}")
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.legend()
-    
-    plt.tight_layout()
+
+    # ----------------------------
+    # Helper: normalize one result object
+    # ----------------------------
+    def _normalize_one(res):
+        identity_idx = None
+        detF = None
+        eps = None
+        F_norm_pre = None
+
+        if isinstance(res, dict):
+            if "F_all" not in res:
+                raise ValueError("New-format results dict must contain 'F_all'.")
+            F_all = np.array(res["F_all"])
+            eps = res.get("eps", None)
+            detF = res.get("detF", None)
+            F_norm_pre = res.get("F_norm", None)
+            identity_idx = res.get("identity_idx", None)
+
+            if eps is not None:
+                eps = np.array(eps, dtype=float)
+            if detF is not None:
+                detF = np.array(detF, dtype=float)
+            if F_norm_pre is not None:
+                F_norm_pre = np.array(F_norm_pre, dtype=float)
+
+            W_mean = res.get("W_mean", None)
+            W_std = res.get("W_std", None)
+            W_per_init = res.get("W_per_init", None)
+
+            if W_mean is not None:
+                W_mean = np.array(W_mean, dtype=float)
+            if W_std is not None:
+                W_std = np.array(W_std, dtype=float)
+            if W_per_init is not None:
+                W_per_init = np.array(W_per_init, dtype=float)
+        else:
+            F_list, W_list = [], []
+            for F, W in res:
+                F_list.append(np.array(F))
+                W_list.append(float(W))
+            F_all = np.stack(F_list, axis=0)
+            W_mean = np.array(W_list, dtype=float)
+            W_std = None
+            W_per_init = None
+
+        n = F_all.shape[0]
+
+        xa = x_axis.lower()
+        if xa == "eps":
+            if eps is None:
+                x = np.arange(n, dtype=float)
+                x_label = r"Index (eps not provided)"
+            else:
+                x = eps
+                x_label = r"$\epsilon$"
+        elif xa == "detf":
+            if detF is None:
+                detF = np.linalg.det(F_all)
+            x = detF
+            x_label = r"$\det F$"
+        elif xa == "f_norm":
+            if F_norm_pre is None:
+                x = np.linalg.norm(F_all.reshape(n, -1), axis=1)
+            else:
+                x = F_norm_pre
+            x_label = r"$\|F\|_F$ (Frobenius norm)"
+        else:
+            raise ValueError("x_axis must be one of {'F_norm','eps','detF'}")
+
+        order = np.argsort(x)
+        x = x[order]
+        if W_mean is not None:
+            W_mean = W_mean[order]
+        if W_std is not None:
+            W_std = W_std[order]
+        if W_per_init is not None:
+            W_per_init = W_per_init[:, order]
+
+        # identity marker position in sorted arrays
+        id_pos = None
+        if mark_identity:
+            if identity_idx is not None:
+                loc = np.where(order == int(identity_idx))[0]
+                if len(loc) == 1:
+                    id_pos = int(loc[0])
+
+        return dict(x=x, x_label=x_label, W_mean=W_mean, W_std=W_std, W_per_init=W_per_init, id_pos=id_pos)
+
+    # ----------------------------
+    # Detect multi-model input
+    # ----------------------------
+    is_multi = isinstance(results, dict) and ("F_all" not in results)
+    if not is_multi:
+        results = {model_name: results}
+
+    # Normalize all models first (also used to compute auto upper-x threshold)
+    normed = {label: _normalize_one(res) for label, res in results.items()}
+    common_x_label = next(iter(normed.values()))["x_label"]
+
+    # ----------------------------
+    # Decide upper-panel x-range (auto) based on y_high_min rule
+    # ----------------------------
+    auto_x_upper = None
+    if use_auto_x_for_upper and (x_axis.lower() == "detf") and show_mean:
+        # Find the smallest x where *all* models have W_mean >= y_high_min.
+        # We do this by scanning each model’s mean curve and taking the max of the individual thresholds.
+        thresholds = []
+        for label, d in normed.items():
+            x = d["x"]
+            W = d["W_mean"]
+            if W is None:
+                continue
+            idx = np.where(W >= y_high_min)[0]
+            if len(idx) == 0:
+                # model never reaches y_high_min; skip from thresholding
+                continue
+            thresholds.append(float(x[idx[0]]))
+        if thresholds:
+            auto_x_upper = max(thresholds)
+
+    x_upper_min_eff = x_upper_min if x_upper_min is not None else auto_x_upper
+
+    # ----------------------------
+    # Figure and axes (broken y)
+    # ----------------------------
+    if broken_y:
+        fig, (ax_top, ax_bot) = plt.subplots(
+            2, 1, figsize=(9.0, 6.2), sharex=True,
+            gridspec_kw={"height_ratios": [1, 1.35], "hspace": 0.05}
+        )
+        axes = (ax_top, ax_bot)
+    else:
+        fig, ax_bot = plt.subplots(figsize=(9.0, 5.6))
+        ax_top = None
+        axes = (ax_bot,)
+
+    # ----------------------------
+    # Calibration overlay (draw ONCE)
+    # ----------------------------
+    max_cal_x = None
+    if overlay_calibration:
+        if calibration_provider is None:
+            raise ValueError("overlay_calibration=True requires calibration_provider callable.")
+
+        # Use the first model’s calibration data (assumes same dataset across models).
+        first_label = next(iter(results.keys()))
+        cal = calibration_provider(first_label, results[first_label])
+        if cal is not None:
+            if x_axis.lower() != "detf":
+                raise ValueError("Calibration overlay currently implemented for x_axis='detF' only.")
+
+            x_cal = np.array(cal["detF_cal"], dtype=float)
+            W_cal = np.array(cal["W_cal"], dtype=float)
+
+            m = np.isfinite(x_cal) & np.isfinite(W_cal)
+            if log_x:
+                m = m & (x_cal > 0)
+            if log_y:
+                m = m & (W_cal > 0)
+            x_cal = x_cal[m]
+            W_cal = W_cal[m]
+
+            if len(x_cal) > 0:
+                max_cal_x = float(np.max(x_cal))
+
+                if calibration_mode == "hexbin":
+                    # density background, subtle
+                    for ax in axes:
+                        ax.hexbin(
+                            x_cal, W_cal,
+                            gridsize=calibration_gridsize,
+                            mincnt=calibration_mincnt,
+                            bins="log",
+                            linewidths=0.0,
+                            alpha=calibration_alpha,
+                            zorder=0,
+                            rasterized=True,
+                        )
+                    # legend proxy (big and visible)
+                    proxy = plt.Line2D(
+                        [0], [0],
+                        marker="s",
+                        linestyle="None",
+                        markersize=10,
+                        markerfacecolor=calibration_color,
+                        markeredgecolor="none",
+                        alpha=0.6,
+                        label="Calibration density",
+                    )
+                    ax_bot.add_line(proxy)
+
+                elif calibration_mode == "subsample_scatter":
+                    rng = np.random.default_rng(0)
+                    idx = rng.choice(len(x_cal), size=min(calibration_subsample, len(x_cal)), replace=False)
+                    x_s = x_cal[idx]
+                    W_s = W_cal[idx]
+                    for ax in axes:
+                        ax.scatter(
+                            x_s, W_s,
+                            s=calibration_marker_size,
+                            alpha=calibration_alpha,
+                            c=calibration_color,
+                            edgecolors="none",
+                            zorder=1,
+                        )
+                    proxy = plt.Line2D(
+                        [0], [0],
+                        marker="o",
+                        linestyle="None",
+                        markersize=8,
+                        markerfacecolor=calibration_color,
+                        markeredgecolor="none",
+                        alpha=0.6,
+                        label="Calibration points (subsample)",
+                    )
+                    ax_bot.add_line(proxy)
+                else:
+                    raise ValueError("calibration_mode must be 'hexbin' or 'subsample_scatter'.")
+
+    # ----------------------------
+    # Plot models on axes
+    # ----------------------------
+    line_handles = {}
+    id_positions = {}  # label -> (x_id, y_id)
+
+    for label, d in normed.items():
+        x = d["x"]
+        W_mean = d["W_mean"]
+        W_std = d["W_std"]
+        W_per_init = d["W_per_init"]
+        id_pos = d["id_pos"]
+
+        # optionally restrict upper panel to x>=x_upper_min_eff (to avoid drawing tiny part twice)
+        def _mask_for_upper(xarr):
+            if x_upper_min_eff is None:
+                return np.ones_like(xarr, dtype=bool)
+            return xarr >= x_upper_min_eff
+
+        # per-init curves
+        if show_inits and (W_per_init is not None):
+            K = W_per_init.shape[0]
+            for k in range(K):
+                for ax in axes:
+                    ax.plot(x, W_per_init[k], linewidth=1.0, alpha=alpha_inits, zorder=2)
+
+        # mean/std
+        if show_mean and (W_mean is not None):
+            fmt = "o-" if marker_mean else "-"
+
+            if broken_y:
+                # draw on both panels; upper panel can be masked to show only high-x part if you want
+                (line_bot,) = ax_bot.plot(x, W_mean, fmt, linewidth=2.0, markersize=3, label=label, zorder=3)
+                line_handles[label] = line_bot
+
+                m_up = _mask_for_upper(x)
+                (line_top,) = ax_top.plot(x[m_up], W_mean[m_up], fmt, linewidth=2.0, markersize=3, label=None, zorder=3)
+
+                if show_std_band and (W_std is not None):
+                    ax_bot.fill_between(x, W_mean - W_std, W_mean + W_std, alpha=0.15, zorder=2)
+                    ax_top.fill_between(x[m_up], (W_mean - W_std)[m_up], (W_mean + W_std)[m_up], alpha=0.15, zorder=2)
+            else:
+                (line_bot,) = ax_bot.plot(x, W_mean, fmt, linewidth=2.0, markersize=3, label=label, zorder=3)
+                line_handles[label] = line_bot
+                if show_std_band and (W_std is not None):
+                    ax_bot.fill_between(x, W_mean - W_std, W_mean + W_std, alpha=0.15, zorder=2)
+
+            # identity marker reference (stored, colored later)
+            if mark_identity and (id_pos is not None):
+                id_positions[label] = (float(x[id_pos]), float(W_mean[id_pos]))
+
+    # identity diamonds, colored like their curve
+    if mark_identity:
+        for label, (x_id, y_id) in id_positions.items():
+            col = line_handles[label].get_color() if label in line_handles else None
+            for ax in axes:
+                # plot only if within this axis y-range later; safe to plot anyway
+                ax.scatter([x_id], [y_id], marker="D", s=65, zorder=5, color=col, label=None)
+            # add legend entry once (on bottom)
+            ax_bot.scatter([x_id], [y_id], marker="D", s=65, zorder=5, color=col, label=rf"{label} @ $F=I$")
+
+    # ----------------------------
+    # Axis scales and limits
+    # ----------------------------
+    for ax in axes:
+        if log_x:
+            ax.set_xscale("log")
+        if log_y:
+            ax.set_yscale("log")
+        ax.grid(True, linestyle="--", alpha=0.6)
+
+    # broken y limits
+    if broken_y:
+        ax_bot.set_ylim(bottom=None, top=y_low_max)
+        # determine a sensible upper y max
+        # use maximum W among all models in the upper region, else y_high_min*y_high_pad
+        y_max = y_high_min * y_high_pad
+        for label, d in normed.items():
+            W = d["W_mean"]
+            if W is None:
+                continue
+            y_max = max(y_max, float(np.nanmax(W)) * 1.05)
+        ax_top.set_ylim(bottom=y_high_min, top=y_max)
+
+        # add break marks
+        ax_top.spines["bottom"].set_visible(False)
+        ax_bot.spines["top"].set_visible(False)
+        ax_top.tick_params(labeltop=False)  # no top x labels
+        ax_bot.xaxis.tick_bottom()
+
+        d = 0.008
+        kwargs = dict(transform=ax_top.transAxes, color="k", clip_on=False, linewidth=1.0)
+        ax_top.plot((-d, +d), (-d, +d), **kwargs)
+        ax_top.plot((1 - d, 1 + d), (-d, +d), **kwargs)
+
+        kwargs = dict(transform=ax_bot.transAxes, color="k", clip_on=False, linewidth=1.0)
+        ax_bot.plot((-d, +d), (1 - d, 1 + d), **kwargs)
+        ax_bot.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)
+
+    # x-range extension to calibration max
+    if extend_det_to_calibration_max and overlay_calibration and (max_cal_x is not None):
+        xmin, xmax = ax_bot.get_xlim()
+        ax_bot.set_xlim(xmin, max(xmax, max_cal_x))
+        if broken_y:
+            ax_top.set_xlim(xmin, max(xmax, max_cal_x))
+
+    # If we computed an upper x-min threshold, annotate it (optional)
+    # if x_upper_min_eff is not None and broken_y:
+    #     ax_bot.axvline(x_upper_min_eff, color="0.5", linestyle=":", linewidth=1.0, alpha=0.6)
+    #     ax_bot.text(x_upper_min_eff, y_low_max, r"$x_{\mathrm{upper}}$", fontsize=9, ha="left", va="top")
+
+    # labels / title / legend
+    ax_bot.set_xlabel(common_x_label)
+    ax_bot.set_ylabel(r"$W(F)$ (Predicted Energy)")
+    if broken_y:
+        ax_top.set_ylabel(r"$W(F)$")
+
+    fig.suptitle("Growth Condition Evaluation (comparison)")
+    ax_bot.legend(loc="lower left")
+    fig.tight_layout()
     plt.show()
+
+
+
+
+
 
 def plot_stretch_distribution_components(F_data, title="Principal Stretch Distribution"):
     """
