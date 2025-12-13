@@ -8,7 +8,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 from . import eval_workflows as ewf
-
+import re
 
 def evaluate_growth_condition(
     models_or_runs,
@@ -469,157 +469,7 @@ def evaluate_objectivity(
     # ----------------------------------------------------------
     raise ValueError(f"Unknown model_type '{model_type}'.")
 
-
-def plot_W_vs_detF(
-    model,
-    model_type: str,
-    F_test: jnp.ndarray,
-    F_train: jnp.ndarray | None = None,
-    G=None,
-    title: str | None = None,
-):
-    """
-    Analyze energy-based models by plotting W(F) vs det(F) for
-    calibration and test data separately.
-
-    Parameters
-    ----------
-    model : callable
-        Trained model.
-
-        - "WI"        : transversely isotropic invariant-based PANN
-                        model((F, I)) -> (W, P)
-        - "WI_Cubic"  : cubic invariant-based PANN
-                        model((F, I)) -> (W, P)
-        - "WF"        : deformation-gradient-based PANN
-                        model(F) -> (W, P)
-
-    model_type : {"WI", "WI_Cubic", "WF"}
-        Type of model (determines how inputs are built from F).
-
-    F_test : (N_test, 3, 3)
-        Deformation gradients for test data.
-
-    F_train : (N_train, 3, 3), optional
-        Deformation gradients for calibration / training data.
-        If None, only test data is plotted.
-
-    G : structural tensor, optional
-        Required for invariant-based cubic models ("WI_Cubic").
-        Passed to your invariant computation routine.
-
-    title : str, optional
-        Plot title. If None, a default title is used.
-    """
-
-    assert model_type in ("WI", "WI_Cubic", "WF"), \
-        "model_type must be 'WI', 'WI_Cubic', or 'WF'"
-
-    # ---------- helper: evaluate W on a batch of F ----------
-
-    def eval_W_batch(F_batch: jnp.ndarray) -> jnp.ndarray:
-        """
-        Compute W(F) for a batch of deformation gradients F_batch.
-        Returns a 1D array of shape (N,).
-        """
-        if model_type == "WI":
-            # TI invariants; assume a single-F function exists and vmap it.
-            # You may adapt the function name to your code.
-            I_batch = jax.vmap(td2.compute_all_invariants)(F_batch)  # (N, dimI)
-
-            # forward call expects (F, I)
-            W_batch, P_batch = jax.vmap(lambda F, I: model((F, I)))(
-                F_batch, I_batch
-            )
-
-        elif model_type == "WI_Cubic":
-            # Cubic invariants; your code already has this batch function.
-            assert G is not None, "G must be provided for WI_Cubic"
-            I_batch = td2.compute_all_invariants_cubic(F_batch, G)  # (N, dimI)
-
-            W_batch, P_batch = jax.vmap(lambda F, I: model((F, I)))(
-                F_batch, I_batch
-            )
-
-        elif model_type == "WF":
-            # WF takes F directly and computes cofF, detF internally
-            W_batch, P_batch = jax.vmap(model)(F_batch)
-
-        else:
-            raise ValueError(f"Unknown model_type '{model_type}'")
-
-        # Make sure W is 1D
-        W_batch = jnp.squeeze(W_batch)
-        return W_batch
-
-    # ---------- evaluate W and det(F) for train / test ----------
-
-    # Test set
-    W_test = eval_W_batch(F_test)
-    detF_test = jnp.linalg.det(F_test)
-
-    # Optional training set
-    W_train = None
-    detF_train = None
-    if F_train is not None:
-        W_train = eval_W_batch(F_train)
-        detF_train = jnp.linalg.det(F_train)
-
-    # ---------- plotting ----------
-
-    plt.figure(figsize=(7, 5))
-
-    if F_train is not None:
-        # calibration data: green, semi-transparent circles
-        plt.scatter(
-            detF_train,
-            W_train,
-            s=20,
-            c="tab:green",
-            alpha=0.6,
-            marker="o",
-            label="Calibration data",
-        )
-
-    # test data: orange crosses
-    plt.scatter(
-        detF_test,
-        W_test,
-        s=25,
-        c="tab:orange",
-        alpha=0.9,
-        marker="x",
-        label="Test data",
-    )
-
-    plt.xlabel(r"$\det(F)$")
-    plt.ylabel(r"$W(F)$ (Predicted Energy)")
-
-    if title is None:
-        title = f"W vs det(F) – {model_type} model"
-    plt.title(title)
-
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-    # Optionally return the underlying data if you want to reuse it
-    return {
-        "detF_train": detF_train,
-        "W_train": W_train,
-        "detF_test": detF_test,
-        "W_test": W_test,
-    }
-
-import jax
-import jax.numpy as jnp
-import matplotlib.pyplot as plt
-import numpy as np
-
 #helper fct to get model predictions for eval
-import jax
-import jax.numpy as jnp
 
 def predict_P_from_F(model, model_type: str, F, G=None):
     """
@@ -871,24 +721,17 @@ def component_error_distribution_grid(
     """
     3x3 grid; each subplot is one P_ij component.
     Uses shared y-axis limits across all subplots.
-
-    Parameters
-    ----------
-    use_symlog : bool
-        If True, use symmetric log scale (recommended for wide error ranges).
-    symlog_linthresh : float
-        Linear threshold around zero for symlog scale.
     """
     P_true = np.array(P_true)
 
     model_names = list(P_pred_dict.keys())
+    display_names = [short_run_label(n, multiline=True) for n in model_names]
     num_models = len(model_names)
 
     # -------------------------------------------------
-    # 1) Precompute all errors to get global min/max
+    # 1) Compute global y-limits (shared across all axes)
     # -------------------------------------------------
     all_errors = []
-
     for name in model_names:
         preds = _to_stacked_preds(P_pred_dict[name])  # (K,N,3,3)
 
@@ -897,14 +740,12 @@ def component_error_distribution_grid(
         else:
             raise ValueError(f"Unknown init_reduce='{init_reduce}'")
 
-        err = P_pred_red - P_true          # (N,3,3)
+        err = P_pred_red - P_true  # (N,3,3)
         all_errors.append(err.reshape(-1))
 
     all_errors = np.concatenate(all_errors)
-    e_min, e_max = all_errors.min(), all_errors.max()
-
-    # Add small padding so boxes don’t touch borders
-    pad = 0.05 * max(abs(e_min), abs(e_max))
+    e_min, e_max = float(all_errors.min()), float(all_errors.max())
+    pad = 0.05 * max(abs(e_min), abs(e_max), 1e-12)
     y_min, y_max = e_min - pad, e_max + pad
 
     # -------------------------------------------------
@@ -923,27 +764,31 @@ def component_error_distribution_grid(
             data = []
 
             for name in model_names:
-                preds = _to_stacked_preds(P_pred_dict[name])
-                P_pred_red = preds.mean(axis=0)
-                e = (P_pred_red - P_true)[:, i, j]
+                preds = _to_stacked_preds(P_pred_dict[name])  # (K,N,3,3)
+                if init_reduce == "mean":
+                    P_pred_red = preds.mean(axis=0)
+                else:
+                    raise ValueError(f"Unknown init_reduce='{init_reduce}'")
+
+                e = (P_pred_red - P_true)[:, i, j]  # (N,)
                 data.append(e)
 
-            bp = ax.boxplot(data, patch_artist=True, showfliers=True)
+            bp = ax.boxplot(data, patch_artist=True)
             for patch in bp["boxes"]:
                 patch.set_alpha(0.6)
 
             ax.set_ylim(y_min, y_max)
-
             if use_symlog:
                 ax.set_yscale("symlog", linthresh=symlog_linthresh)
 
             ax.set_xticks(range(1, num_models + 1))
-            ax.set_xticklabels(model_names, rotation=45, ha="right", fontsize=8)
+            ax.set_xticklabels(display_names, rotation=0, ha="center", fontsize=7)
             ax.set_ylabel(f"Error P{comp_labels[i][j]}")
             ax.grid(True, linestyle="--", alpha=0.4)
 
     plt.tight_layout()
     plt.show()
+
 
 
 
@@ -955,49 +800,52 @@ def component_rmse_barplot(
 ):
     """
     Grouped bar plot: RMSE per component for each model.
-
-    Supports multiple initializations per model:
-      - P_pred_dict[name] can be (N,3,3) OR (K,N,3,3) OR list of (N,3,3).
-    Reduces init dimension by averaging predictions across inits first
-    (so RMSE is computed on the averaged prediction).
     """
     P_true = np.array(P_true)
     model_names = list(P_pred_dict.keys())
+    legend_names = [short_run_label(n, multiline=False) for n in model_names]
     num_models = len(model_names)
 
-    rmse = {}  # name -> (9,)
+    comp_labels_flat = ["11", "12", "13", "21", "22", "23", "31", "32", "33"]
+    x = np.arange(len(comp_labels_flat))
+    width = 0.8 / max(num_models, 1)
+
+    rmse = {}
     for name in model_names:
         preds = _to_stacked_preds(P_pred_dict[name])  # (K,N,3,3)
-
         if init_reduce == "mean":
-            P_pred_red = preds.mean(axis=0)          # (N,3,3)
+            P_pred_red = preds.mean(axis=0)
         else:
             raise ValueError(f"Unknown init_reduce='{init_reduce}'")
 
-        e = P_pred_red - P_true                      # (N,3,3)
-        rmse_mat = np.sqrt(np.mean(e**2, axis=0))    # (3,3)
-        rmse[name] = rmse_mat.reshape(-1)            # (9,)
+        e = P_pred_red - P_true  # (N,3,3)
+        rmse[name] = np.sqrt(np.mean(e**2, axis=0)).reshape(-1)  # (9,)
 
-    comp_labels_flat = ["11", "12", "13",
-                        "21", "22", "23",
-                        "31", "32", "33"]
+    fig, ax = plt.subplots(figsize=(12.5, 5.2))
 
-    x = np.arange(9)
-    width = 0.8 / num_models
-
-    plt.figure(figsize=(12, 5))
-    for idx, name in enumerate(model_names):
+    for idx, (name, leg) in enumerate(zip(model_names, legend_names)):
         offset = (idx - (num_models - 1) / 2) * width
-        plt.bar(x + offset, rmse[name], width=width, label=name, alpha=0.8)
+        ax.bar(x + offset, rmse[name], width=width, label=leg, alpha=0.85)
 
-    plt.xticks(x, [f"P{c}" for c in comp_labels_flat])
-    plt.ylabel("RMSE")
-    plt.yscale("log")
-    plt.title(title)
-    plt.grid(True, axis="y", linestyle="--", alpha=0.5)
-    plt.legend()
-    plt.tight_layout()
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"P{c}" for c in comp_labels_flat])
+    ax.set_ylabel("RMSE")
+    ax.set_yscale("log")
+    ax.set_title(title)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+
+    # Legend outside to avoid covering bars
+    ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+        fontsize=8,
+    )
+
+    # Reserve space on the right for the legend
+    fig.tight_layout(rect=[0.0, 0.0, 0.78, 1.0])
     plt.show()
+
 
 def _stack_preds(preds):
     """
@@ -1032,75 +880,59 @@ def rmse_energy_and_stress_barplots(
 ):
     """
     Compute and plot RMSE for energy (W) and stress (P).
-
-    Parameters
-    ----------
-    W_true : (N,) or (N,1)
-        Ground-truth energy.
-    P_true : (N,3,3)
-        Ground-truth stress.
-    W_pred_dict : dict[str, preds]
-        preds can be:
-          - (N,) or (N,1)
-          - (K,N) or (K,N,1)
-          - list of (N,) arrays
-    P_pred_dict : dict[str, preds]
-        preds can be:
-          - (N,3,3)
-          - (K,N,3,3)
-          - list of (N,3,3) arrays
     """
-
-    W_true = np.squeeze(np.array(W_true))        # (N,)
-    P_true = np.array(P_true)                    # (N,3,3)
+    W_true = np.array(W_true).reshape(-1)
+    P_true = np.array(P_true)
 
     model_names = list(W_pred_dict.keys())
+    xlabels = [short_run_label(n, multiline=True) for n in model_names]
 
+    # ---- RMSE(W) ----
     rmse_W = {}
-    rmse_P = {}
-
     for name in model_names:
-        # -----------------
-        # Energy RMSE
-        # -----------------
-        W_preds = _stack_preds(W_pred_dict[name])   # (K,N) or (K,N,1)
-        W_preds = np.squeeze(W_preds)                # (K,N)
-        W_mean = W_preds.mean(axis=0)                # (N,)
+        W_preds = _stack_preds(W_pred_dict[name])  # (K,N) or (K,N,1)
+        W_mean = np.squeeze(W_preds.mean(axis=0))
+        err = W_mean - W_true
+        rmse_W[name] = float(np.sqrt(np.mean(err**2)))
 
-        rmse_W[name] = np.sqrt(np.mean((W_mean - W_true) ** 2))
-
-        # -----------------
-        # Stress RMSE
-        # -----------------
-        P_preds = _stack_preds(P_pred_dict[name])    # (K,N,3,3)
-        P_mean = P_preds.mean(axis=0)                # (N,3,3)
-
+    # ---- RMSE(P) ----
+    rmse_P = {}
+    for name in model_names:
+        P_preds = _stack_preds(P_pred_dict[name])  # (K,N,3,3)
+        P_mean = P_preds.mean(axis=0)
         err = P_mean - P_true
-        rmse_P[name] = np.sqrt(np.mean(err ** 2))    # scalar over all comps
+        rmse_P[name] = float(np.sqrt(np.mean(err**2)))
 
     # -----------------
     # Plot: Energy RMSE
     # -----------------
-    plt.figure(figsize=(6, 4))
-    plt.bar(rmse_W.keys(), rmse_W.values(), alpha=0.8)
-    plt.ylabel("RMSE (Energy W)")
-    plt.title(title_energy)
-    plt.yscale("log") 
-    plt.grid(True, axis="y", linestyle="--", alpha=0.5)
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(8.5, 4.6))
+    ax.bar(range(len(model_names)), [rmse_W[n] for n in model_names], alpha=0.85)
+    ax.set_ylabel("RMSE (Energy W)")
+    ax.set_title(title_energy)
+    ax.set_yscale("log")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+
+    ax.set_xticks(range(len(model_names)))
+    ax.set_xticklabels(xlabels, fontsize=7)
+    fig.tight_layout()
     plt.show()
 
     # -----------------
     # Plot: Stress RMSE
     # -----------------
-    plt.figure(figsize=(6, 4))
-    plt.bar(rmse_P.keys(), rmse_P.values(), alpha=0.8)
-    plt.ylabel("RMSE (Stress P)")
-    plt.yscale("log") 
-    plt.title(title_stress)
-    plt.grid(True, axis="y", linestyle="--", alpha=0.5)
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(8.5, 4.6))
+    ax.bar(range(len(model_names)), [rmse_P[n] for n in model_names], alpha=0.85)
+    ax.set_ylabel("RMSE (Stress P)")
+    ax.set_yscale("log")
+    ax.set_title(title_stress)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+
+    ax.set_xticks(range(len(model_names)))
+    ax.set_xticklabels(xlabels, fontsize=7)
+    fig.tight_layout()
     plt.show()
+
 
 
 @dataclass(frozen=True)
@@ -1415,3 +1247,86 @@ def compute_rmse_over_test_set(
         errors_P=errors_P_out,
         errors_W=errors_W_out,
     )
+
+def _steps_to_k(steps: int) -> str:
+    if steps >= 1_000_000:
+        val = steps / 1_000_000
+        return f"{val:g}M"
+    if steps >= 1_000:
+        return f"{steps//1000}k"
+    return str(steps)
+
+def _arch_to_size(l: int, n: int) -> str:
+    if (l, n) == (2, 8):
+        return "S"
+    if (l, n) == (3, 16):
+        return "M"
+    if (l, n) == (4, 32):
+        return "L"
+    return f"l{l}n{n}"
+
+def _size_word_to_letter(size_word: str) -> str:
+    size_word = size_word.lower()
+    if size_word == "small":
+        return "S"
+    if size_word == "medium":
+        return "M"
+    if size_word == "large":
+        return "L"
+    return "?"
+
+def short_run_label(name: str, *, multiline: bool = True) -> str:
+    """
+    Robust compact label builder across tasks.
+
+    Supports:
+      - Full tags with arch+steps:   ..._l{l}_n{n}_steps{steps}...
+      - Task 2.2 synthetic keys:     small_steps100000, medium_steps300000, ...
+      - Drops init aggregation suffixes: _avg20inits -> avg
+    """
+    # Normalize avg suffix
+    s = re.sub(r"_avg\d+inits$", "_avg", name)
+    s = re.sub(r"_avg\d+$", "_avg", s)
+
+    # ---------- Case A: Task 2.2 synthetic keys like "small_steps100000" ----------
+    m = re.match(r"^(small|medium|large)_steps(\d+)$", s, flags=re.IGNORECASE)
+    if m:
+        size_letter = _size_word_to_letter(m.group(1))
+        steps_str = _steps_to_k(int(m.group(2)))
+        model_id = "MS"  # your Task 2.2 model family
+        avg_flag = "avg"
+        parts = [model_id, size_letter, steps_str, avg_flag]
+        return "\n".join(parts) if multiline else " ".join(parts)
+
+    # ---------- Case B: artifact tag like "MS_small_l2_n8_steps100000" ----------
+    # model_id is first token before "_"
+    model_id = s.split("_", 1)[0] if "_" in s else s
+
+    # size from name if present (MS_small_ / MS_medium_ / MS_large_)
+    msize = re.search(r"_(small|medium|large)_", s, flags=re.IGNORECASE)
+    size_letter_from_word = _size_word_to_letter(msize.group(1)) if msize else None
+
+    # arch+steps if present
+    march = re.search(r"_l(\d+)_n(\d+)_steps(\d+)", s)
+    if march:
+        l = int(march.group(1))
+        n = int(march.group(2))
+        steps = int(march.group(3))
+        # prefer S/M/L mapping via (l,n); fallback to size word if available
+        size_letter = _arch_to_size(l, n)
+        if size_letter.startswith("l") and size_letter_from_word is not None:
+            size_letter = size_letter_from_word
+        steps_str = _steps_to_k(steps)
+    else:
+        # fallback: if we at least have "..._steps123"
+        msteps = re.search(r"_steps(\d+)", s)
+        steps_str = _steps_to_k(int(msteps.group(1))) if msteps else "?"
+        size_letter = size_letter_from_word if size_letter_from_word is not None else "?"
+
+    avg_flag = "avg" if ("_avg" in s) else ""
+
+    parts = [model_id, size_letter, steps_str]
+    if avg_flag:
+        parts.append(avg_flag)
+
+    return "\n".join(parts) if multiline else " ".join(parts)
