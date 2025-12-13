@@ -429,6 +429,82 @@ def plot_generalization_heatmap(results_df, title="Model Generalization: Test Er
     
     return fig
 
+def plot_generalization_heatmap_from_artifacts(
+    results_df, 
+    title="Model Generalization: Test Error Heatmap",
+    log_scale=True,
+    figsize=(14, 6),
+):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from matplotlib.colors import LogNorm
+
+    df = results_df.copy()
+    
+    # Average über Inits bilden falls vorhanden
+    if 'Init' in df.columns:
+        df = df.groupby(['Model', 'N_Train_Paths', 'Run'])['Test_Error'].mean().reset_index()
+    
+    models = ['Naive FFNN', 'PANN']
+    n_paths_list = sorted(df['N_Train_Paths'].unique())
+    n_runs = df['Run'].nunique()
+    
+    fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
+    
+    vmin = df['Test_Error'].min()
+    vmax = df['Test_Error'].max()
+    
+    if log_scale:
+        if vmin <= 0:
+            vmin = 1e-6
+        norm = LogNorm(vmin=vmin, vmax=vmax)
+    else:
+        norm = None
+
+    for ax, model_name in zip(axes, models):
+        model_df = df[df['Model'] == model_name]
+        pivot = model_df.pivot(index='Run', columns='N_Train_Paths', values='Test_Error')
+        pivot = pivot.reindex(columns=n_paths_list)
+        
+        if log_scale:
+            im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn_r', norm=norm)
+        else:
+            im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn_r', vmin=vmin, vmax=vmax)
+        
+        for i in range(pivot.shape[0]):
+            for j in range(pivot.shape[1]):
+                val = pivot.values[i, j]
+                if not np.isnan(val):
+                    if log_scale:
+                        is_middle = (vmin * 2 < val < vmax / 2)
+                    else:
+                        is_middle = (vmin + (vmax-vmin)*0.3 < val < vmin + (vmax-vmin)*0.7)
+                    text_color = 'black' if is_middle else 'white'
+                    ax.text(j, i, f'{val:.2f}', ha='center', va='center',
+                            fontsize=6, color=text_color, fontweight='bold')
+        
+        ax.set_yticks(range(n_runs))
+        ax.set_yticklabels([f'Run {r}' for r in range(n_runs)])
+        ax.set_ylabel(model_name, fontsize=12, fontweight='bold')
+        
+        for spine in ax.spines.values():
+            spine.set_linewidth(2)
+    
+    axes[1].set_xticks(range(len(n_paths_list)))
+    axes[1].set_xticklabels([str(n) for n in n_paths_list], rotation=45, ha='right')
+    axes[1].set_xlabel('Number of Training Loadpaths', fontsize=12)
+    
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+    
+    cbar = fig.colorbar(im, ax=axes, shrink=0.8, pad=0.02, aspect=30)
+    scale_label = "Log Scale" if log_scale else "Linear Scale"
+    cbar.set_label(f'Test Error (RMSE) - {scale_label}', fontsize=11)
+    
+    plt.suptitle(title, fontsize=14, fontweight='bold', y=1.02)
+    
+    return fig
+
 def plot_model_and_history(model, X_cal, Y_cal, history, *,
                            title_model="Model Prediction",
                            title_history="Training History"):
