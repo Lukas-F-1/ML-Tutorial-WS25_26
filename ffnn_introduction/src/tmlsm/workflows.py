@@ -2319,3 +2319,1765 @@ def _build_like_model_from_meta(
         "Extend _build_like_model_from_meta for this case."
     )
 
+#---------- Parallelized
+
+def _run_single_task2_3_msw(args):
+    """
+    Single MSW weighted training run for Task 2.3 (one init), with persistence.
+
+    Notes:
+      - Must be top-level for joblib (Windows spawn).
+      - Avoids relying on outer scope.
+    """
+    import json
+    import pickle
+    from pathlib import Path
+
+    import jax
+    import jax.numpy as jnp
+    import jax.random as jrandom
+    import klax
+
+    from . import models as tm
+    from . import losses as tl
+
+    (
+        init_idx,                 # 1-based init index
+        X_cal_MS, Y_cal_MS, sample_weights,
+        steps, batch_size, learning_rate,
+        base_seed,
+        w_uni, w_ps, w_bi, w_uni_inv, w_ps_inv, w_bi_inv,
+        out_dir,
+    ) = args
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Deterministic keys per init
+    model_key = jrandom.PRNGKey(base_seed + init_idx * 1000 + 1)
+    train_key = jrandom.PRNGKey(base_seed + init_idx * 1000 + 2)
+
+    # Weighted training data format: (X, (Y, weights))
+    train_data_MS_w = (X_cal_MS, (Y_cal_MS, sample_weights))
+
+    # Loss function
+    loss_fn_MS_w = tl.WeightedMSE()
+
+    try:
+        # MEDIUM architecture: l=3, n=16
+        model = tm.build(
+            key=model_key,
+            input_dim=6,
+            output_dim=9,
+            num_hidden_layers=3,
+            nodes_per_layer=16,
+            activations=jax.nn.softplus,
+            constrain_icnn_weights=False
+        )
+
+        trained, history = tm.train_model(
+            model,
+            train_data_MS_w,
+            train_key,
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            loss_fn=loss_fn_MS_w
+        )
+
+        final_model = klax.finalize(trained)
+
+        # Save artifacts
+        tag = f"MSW_medium_l3_n16_steps{steps}_init{init_idx:02d}"
+        model_path   = out_dir / f"{tag}.eqx"
+        history_path = out_dir / f"{tag}_history.pkl"
+        meta_path    = out_dir / f"{tag}.json"
+
+        # Persist
+        import equinox as eqx
+        eqx.tree_serialise_leaves(str(model_path), final_model)
+        with open(history_path, "wb") as f:
+            pickle.dump(history, f)
+
+        meta = {
+            "task": "2.3",
+            "model_id": "MSW",
+            "tag": tag,
+            "architecture_note": "MEDIUM baseline from Task 2.2: l=3, n=16, softplus",
+            "comparison_note": "Compare to Task 2.2 MS (unweighted) with l=3, n=16 and steps=300000",
+            "num_hidden_layers": 3,
+            "nodes_per_layer": 16,
+            "activation": "softplus",
+            "steps": int(steps),
+            "init_idx": int(init_idx),
+            "n_inits": None,  # filled by caller if desired; kept optional here
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "loss": "WeightedMSE",
+            "weights": {
+                "w_uni": float(w_uni),
+                "w_ps": float(w_ps),
+                "w_bi": float(w_bi),
+                "w_uni_inv": float(w_uni_inv),
+                "w_ps_inv": float(w_ps_inv),
+                "w_bi_inv": float(w_bi_inv),
+            },
+            "base_seed": int(base_seed),
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(history_path),
+        }
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        # Return something useful; also prints which init failed
+        print(f"[Task2.3][MSW] init{init_idx:02d} failed: {e}")
+        return {
+            "task": "2.3",
+            "model_id": "MSW",
+            "init_idx": int(init_idx),
+            "steps": int(steps),
+            "error": str(e),
+        }
+
+def workflow_task_2_3_train_ms_weighted_5inits(
+    dataset_1: dict,
+    *,
+    out_dir: str | Path = "artifacts/task2_3",
+    n_inits: int = 5,
+    steps: int = 300_000,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    n_jobs: int = -2,
+    backend: str = "loky",
+    max_nbytes: str | None = "50M",
+    verbose: int | None = None,
+    base_seed: int | None = None,
+):
+    """
+    Task 2.3: Loss-weighted MS model (MSW) training with multiple random initializations.
+
+    Parallelization:
+      - uses joblib over init dimension
+      - each init writes its own artifacts, so no write conflicts
+
+    Parameters added:
+      - n_jobs, backend, max_nbytes, verbose
+      - base_seed (optional): to make init keys stable across runs/machines
+    """
+    from joblib import Parallel, delayed
+
+    out_dir = _ensure_dir(out_dir)
+
+    # ------------------------------------------------------------
+    # Build calibration dataset (same as Task 2.2)
+    # ------------------------------------------------------------
+    C_cal_MS = jnp.concatenate([dataset_1["C_uni"], dataset_1["C_ps"], dataset_1["C_bi"]], axis=0)
+    P_cal_MS = jnp.concatenate([dataset_1["P_uni"], dataset_1["P_ps"], dataset_1["P_bi"]], axis=0)
+
+    X_cal_MS = jax.vmap(td2.C_to_six)(C_cal_MS)               # (N,6)
+    Y_cal_MS = P_cal_MS.reshape(P_cal_MS.shape[0], 9)         # (N,9)
+
+    # ------------------------------------------------------------
+    # Compute inverse path weights (Task 2.3 logic)
+    # IMPORTANT: order must match concatenation above: [uni, ps, bi]
+    # ------------------------------------------------------------
+    P_uni = dataset_1["P_uni"]
+    P_ps  = dataset_1["P_ps"]
+    P_bi  = dataset_1["P_bi"]
+
+    w_uni = td2.compute_path_weight(P_uni)
+    w_ps  = td2.compute_path_weight(P_ps)
+    w_bi  = td2.compute_path_weight(P_bi)
+
+    w_uni_inv = 1.0 / w_uni
+    w_ps_inv  = 1.0 / w_ps
+    w_bi_inv  = 1.0 / w_bi
+
+    weights_uni = w_uni_inv * jnp.ones(P_uni.shape[0])
+    weights_ps  = w_ps_inv  * jnp.ones(P_ps.shape[0])
+    weights_bi  = w_bi_inv  * jnp.ones(P_bi.shape[0])
+
+    sample_weights = jnp.concatenate([weights_uni, weights_ps, weights_bi], axis=0).reshape(-1)
+
+    # ------------------------------------------------------------
+    # Stable base_seed (so init keys are deterministic)
+    # ------------------------------------------------------------
+    if base_seed is None:
+        # deterministic default from master_key (but converted to python int)
+        mk = dataset_1["master_key"]
+        base_seed = int(jrandom.randint(mk, (), 0, 10_000_000))
+
+    # ------------------------------------------------------------
+    # Build experiments (one per init)
+    # ------------------------------------------------------------
+    experiments = []
+    for init_idx in range(1, n_inits + 1):
+        experiments.append((
+            init_idx,
+            X_cal_MS, Y_cal_MS, sample_weights,
+            steps, batch_size, learning_rate,
+            base_seed,
+            w_uni, w_ps, w_bi, w_uni_inv, w_ps_inv, w_bi_inv,
+            str(out_dir),
+        ))
+
+    total = len(experiments)
+    if verbose is None:
+        # similar spirit to your Task 4: show progress
+        verbose = total
+
+    print(f"Task 2.3 (MSW): training {n_inits} initializations in parallel (n_jobs={n_jobs}, backend={backend})")
+
+    results = Parallel(
+        n_jobs=n_jobs,
+        backend=backend,
+        verbose=verbose,
+        max_nbytes=max_nbytes,
+    )(
+        delayed(_run_single_task2_3_msw)(exp) for exp in experiments
+    )
+
+    # Optional: fill n_inits in each successful meta
+    for m in results:
+        if isinstance(m, dict) and m.get("model_id") == "MSW" and "error" not in m:
+            m["n_inits"] = int(n_inits)
+
+    return results
+
+def _run_single_task3_witi(args):
+    """
+    Single training run for Task 3: (strategy, init) of WI_ti benchmark model.
+
+    Must be top-level for joblib on Windows (loky backend).
+    """
+    import json
+    import pickle
+    from pathlib import Path
+
+    import jax
+    import jax.numpy as jnp
+    import jax.random as jrandom
+    import equinox as eqx
+    import klax
+
+    from . import models as tm
+    from . import losses as tl
+    from . import data_t2 as td2
+
+    (
+        strat_name, init_idx,                      # e.g. "A", 1..n
+        G_ti,
+        F_cal_all, I_cal_all, W_cal_all, P_cal_all,
+        sample_weights,
+        steps, batch_size, learning_rate,
+        alpha, beta,
+        base_seed,
+        w_uni, w_ps, w_bi, w_uni_inv, w_ps_inv, w_bi_inv,
+        out_dir,
+    ) = args
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # deterministic keys per (strategy, init)
+    # offset strat so A/B/C never collide
+    strat_offset = {"A": 100_000, "B": 200_000, "C": 300_000}.get(strat_name, 999_000)
+    seed0 = base_seed + strat_offset + init_idx * 1000
+
+    model_key = jrandom.PRNGKey(seed0 + 1)
+    train_key = jrandom.PRNGKey(seed0 + 2)
+
+    # Train data format for WeightedSobolevLoss:
+    # batch = (x, ((W_true, P_true), w))
+    train_data = (
+        (F_cal_all, I_cal_all),
+        ((W_cal_all, P_cal_all), sample_weights),
+    )
+
+    loss_fn = tl.WeightedSobolevLoss(alpha=float(alpha), beta=float(beta))
+
+    tag = f"WITI_{strat_name}_bench_l3_n16_steps{steps}_init{init_idx:02d}"
+    model_path   = out_dir / f"{tag}.eqx"
+    history_path = out_dir / f"{tag}_history.pkl"
+    meta_path    = out_dir / f"{tag}.json"
+
+    try:
+        # Benchmark WI_ti model (l=3, n=16, softplus, FICNN enabled)
+        model = tm.SobolevModel_WI_ti(
+            G_ti=G_ti,
+            key=model_key,
+            input_dim=5,
+            output_dim="scalar",
+            num_hidden_layers=3,
+            nodes_per_layer=16,
+            activation=jax.nn.softplus,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+        trained_model, history = tm.train_WI(
+            model=model,
+            train_data=train_data,
+            key=train_key,
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            loss_fn=loss_fn,
+        )
+
+        final_model = klax.finalize(trained_model)
+
+        # Persist
+        eqx.tree_serialise_leaves(str(model_path), final_model)
+        with open(history_path, "wb") as f:
+            pickle.dump(history, f)
+
+        meta = {
+            "task": "3",
+            "model_id": "WITI",
+            "strategy": strat_name,
+            "tag": tag,
+            "benchmark_architecture": {"l": 3, "n": 16, "activation": "softplus"},
+            "steps": int(steps),
+            "init_idx": int(init_idx),
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "loss": "WeightedSobolevLoss",
+            "loss_params": {"alpha": float(alpha), "beta": float(beta)},
+            "loss_weighting": "inverse path weights (uniaxial, pure shear, biaxial)",
+            "path_weights": {
+                "w_uni": float(w_uni), "w_ps": float(w_ps), "w_bi": float(w_bi),
+                "w_uni_inv": float(w_uni_inv), "w_ps_inv": float(w_ps_inv), "w_bi_inv": float(w_bi_inv),
+                "concat_order": "[biaxial, uniaxial, pure_shear]",
+            },
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(history_path),
+            "base_seed": int(base_seed),
+        }
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        print(f"[Task3][WITI] strategy={strat_name} init={init_idx:02d} FAILED: {e}")
+        return {
+            "task": "3",
+            "model_id": "WITI",
+            "strategy": strat_name,
+            "init_idx": int(init_idx),
+            "steps": int(steps),
+            "error": str(e),
+        }
+
+def workflow_task_3_train_wi_ti_strategies_abc(
+    dataset_1: dict,
+    *,
+    out_dir: str | Path = "artifacts/task3",
+    n_inits: int = 5,
+    steps: int = 300_000,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    n_jobs: int = -2,
+    backend: str = "loky",
+    max_nbytes: str | None = "50M",
+    verbose: int | None = None,
+    base_seed: int = 42,
+):
+    """
+    Task 3 workflow: Train WI_ti benchmark model under strategies A/B/C
+    with n_inits random initializations each, in parallel using joblib.
+    """
+    from joblib import Parallel, delayed
+
+    out_dir = _ensure_dir(out_dir)
+
+    G_ti = dataset_1["G_ti"]
+
+    # ------------------------------------------------------------
+    # Build calibration dataset with the order you used in Task 3:
+    # IMPORTANT: order [biaxial, uniaxial, pure_shear]
+    # ------------------------------------------------------------
+    F_bi, F_uni, F_ps = dataset_1["F_bi"], dataset_1["F_uni"], dataset_1["F_ps"]
+    P_bi, P_uni, P_ps = dataset_1["P_bi"], dataset_1["P_uni"], dataset_1["P_ps"]
+    W_bi, W_uni, W_ps = dataset_1["W_bi"], dataset_1["W_uni"], dataset_1["W_ps"]
+    I_bi, I_uni, I_ps = dataset_1["I_bi"], dataset_1["I_uni"], dataset_1["I_ps"]
+
+    F_cal_all = jnp.concatenate([F_bi, F_uni, F_ps], axis=0)
+    I_cal_all = jnp.concatenate([I_bi, I_uni, I_ps], axis=0)
+    W_cal_all = jnp.concatenate([W_bi, W_uni, W_ps], axis=0)
+    P_cal_all = jnp.concatenate([P_bi, P_uni, P_ps], axis=0)
+
+    # ------------------------------------------------------------
+    # Compute inverse path weights
+    # ------------------------------------------------------------
+    w_uni = td2.compute_path_weight(P_uni)
+    w_ps  = td2.compute_path_weight(P_ps)
+    w_bi  = td2.compute_path_weight(P_bi)
+
+    w_uni_inv = 1.0 / w_uni
+    w_ps_inv  = 1.0 / w_ps
+    w_bi_inv  = 1.0 / w_bi
+
+    weights_bi  = w_bi_inv  * jnp.ones(P_bi.shape[0])
+    weights_uni = w_uni_inv * jnp.ones(P_uni.shape[0])
+    weights_ps  = w_ps_inv  * jnp.ones(P_ps.shape[0])
+
+    # IMPORTANT: must match F_cal_all concat order [bi, uni, ps]
+    sample_weights = jnp.concatenate([weights_bi, weights_uni, weights_ps], axis=0).reshape(-1)
+
+    # ------------------------------------------------------------
+    # Strategies
+    # ------------------------------------------------------------
+    strategies = {
+        "A": (1.0, 0.0),
+        "B": (0.0, 1.0),
+        "C": (1.0, 1.0),
+    }
+
+    # ------------------------------------------------------------
+    # Build experiments list (strategy × init)
+    # ------------------------------------------------------------
+    experiments = []
+    for strat_name, (alpha, beta) in strategies.items():
+        for init_idx in range(1, n_inits + 1):
+            experiments.append((
+                strat_name, init_idx,
+                G_ti,
+                F_cal_all, I_cal_all, W_cal_all, P_cal_all,
+                sample_weights,
+                steps, batch_size, learning_rate,
+                alpha, beta,
+                base_seed,
+                w_uni, w_ps, w_bi, w_uni_inv, w_ps_inv, w_bi_inv,
+                str(out_dir),
+            ))
+
+    total = len(experiments)
+    if verbose is None:
+        verbose = total
+
+    print(f"Task 3: 3 strategies × {n_inits} inits = {total} trainings (n_jobs={n_jobs}, backend={backend})")
+
+    results = Parallel(
+        n_jobs=n_jobs,
+        backend=backend,
+        verbose=verbose,
+        max_nbytes=max_nbytes,
+    )(
+        delayed(_run_single_task3_witi)(exp) for exp in experiments
+    )
+
+    return results
+
+def _run_single_task3_witi_arch_steps(args):
+    """
+    Single run for Task 3 – Part 2:
+    (l, n, steps, init) for fixed strategy.
+    """
+    import json
+    import pickle
+    from pathlib import Path
+
+    import jax
+    import jax.random as jrandom
+    import equinox as eqx
+    import klax
+
+    from . import models as tm
+    from . import losses as tl
+
+    (
+        l, n, steps, init_idx,
+        strategy, alpha, beta,
+        G_ti,
+        F_cal_all, I_cal_all, W_cal_all, P_cal_all,
+        sample_weights,
+        batch_size, learning_rate,
+        base_seed,
+        out_dir,
+    ) = args
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    seed0 = base_seed + 10_000 * l + 1_000 * n + 10 * init_idx
+    model_key = jrandom.PRNGKey(seed0 + 1)
+    train_key = jrandom.PRNGKey(seed0 + 2)
+
+    train_data = (
+        (F_cal_all, I_cal_all),
+        ((W_cal_all, P_cal_all), sample_weights),
+    )
+
+    loss_fn = tl.WeightedSobolevLoss(alpha=alpha, beta=beta)
+
+    tag = f"WITI_{strategy}_l{l}_n{n}_steps{steps}_init{init_idx:02d}"
+    model_path = out_dir / f"{tag}.eqx"
+    history_path = out_dir / f"{tag}_history.pkl"
+    meta_path = out_dir / f"{tag}.json"
+
+    try:
+        model = tm.SobolevModel_WI_ti(
+            G_ti=G_ti,
+            key=model_key,
+            input_dim=5,
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=jax.nn.softplus,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+        trained, history = tm.train_WI(
+            model=model,
+            train_data=train_data,
+            key=train_key,
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            loss_fn=loss_fn,
+        )
+
+        final_model = klax.finalize(trained)
+
+        eqx.tree_serialise_leaves(str(model_path), final_model)
+        with open(history_path, "wb") as f:
+            pickle.dump(history, f)
+
+        meta = {
+            "task": "3.2",
+            "model_id": "WITI",
+            "strategy": strategy,
+            "tag": tag,
+            "architecture": {"l": l, "n": n, "activation": "softplus"},
+            "steps": steps,
+            "init_idx": init_idx,
+            "loss": "WeightedSobolevLoss",
+            "loss_params": {"alpha": alpha, "beta": beta},
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(history_path),
+        }
+
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        print(f"[Task3.2] FAIL l={l} n={n} steps={steps} init={init_idx}: {e}")
+        return {"error": str(e)}
+
+def workflow_task_3_sweep_wi_ti_arch_steps(
+    dataset_1,
+    *,
+    strategy: str,
+    out_dir="artifacts/task3_section2",
+    n_inits=5,
+    steps_list=(100_000, 300_000, 500_000),
+    archs=((2, 8), (3, 16), (4, 32)),
+    batch_size=32,
+    learning_rate=1e-3,
+    n_jobs=-2,
+    backend="loky",
+    base_seed=42,
+):
+    from joblib import Parallel, delayed
+    from . import data_t2 as td2
+
+    out_dir = _ensure_dir(out_dir)
+
+    # Calibration data (same as Part 1)
+    G_ti = dataset_1["G_ti"]
+
+    F_cal_all = jnp.concatenate(
+        [dataset_1["F_bi"], dataset_1["F_uni"], dataset_1["F_ps"]], axis=0
+    )
+    I_cal_all = jnp.concatenate(
+        [dataset_1["I_bi"], dataset_1["I_uni"], dataset_1["I_ps"]], axis=0
+    )
+    W_cal_all = jnp.concatenate(
+        [dataset_1["W_bi"], dataset_1["W_uni"], dataset_1["W_ps"]], axis=0
+    )
+    P_cal_all = jnp.concatenate(
+        [dataset_1["P_bi"], dataset_1["P_uni"], dataset_1["P_ps"]], axis=0
+    )
+
+    w_uni = td2.compute_path_weight(dataset_1["P_uni"])
+    w_ps  = td2.compute_path_weight(dataset_1["P_ps"])
+    w_bi  = td2.compute_path_weight(dataset_1["P_bi"])
+
+    weights = jnp.concatenate([
+        (1.0 / w_bi)  * jnp.ones(dataset_1["P_bi"].shape[0]),
+        (1.0 / w_uni) * jnp.ones(dataset_1["P_uni"].shape[0]),
+        (1.0 / w_ps)  * jnp.ones(dataset_1["P_ps"].shape[0]),
+    ])
+
+    # Strategy parameters
+    alpha, beta = {"A": (1, 0), "B": (0, 1), "C": (1, 1)}[strategy]
+
+    experiments = []
+    for (l, n) in archs:
+        for steps in steps_list:
+            for init_idx in range(1, n_inits + 1):
+                experiments.append((
+                    l, n, steps, init_idx,
+                    strategy, alpha, beta,
+                    G_ti,
+                    F_cal_all, I_cal_all, W_cal_all, P_cal_all,
+                    weights,
+                    batch_size, learning_rate,
+                    base_seed,
+                    str(out_dir),
+                ))
+
+    return Parallel(n_jobs=n_jobs, backend=backend)(
+        delayed(_run_single_task3_witi_arch_steps)(e) for e in experiments
+    )
+
+def _run_single_task3_section2(exp):
+    """
+    One training run for Task 3 - Section 2:
+      strategy + (arch_name,l,n) + steps + init_idx
+
+    exp is a tuple with all data needed so it is joblib-picklable.
+    """
+    import json
+    import pickle
+    from pathlib import Path
+
+    import jax
+    import jax.numpy as jnp
+    import jax.random as jrandom
+    import equinox as eqx
+    import klax
+
+    from . import models as tm
+    from . import losses as tl
+
+    (
+        strategy, arch_name, l, n, steps, init_idx,
+        # calibration data
+        G_ti,
+        F_cal_all, I_cal_all, W_cal_all, P_cal_all,
+        sample_weights,
+        # hyperparams
+        batch_size, learning_rate,
+        # deterministic seeding
+        base_seed,
+        # output
+        out_dir,
+    ) = exp
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # deterministic-ish run seed
+    # include all config knobs so parallel scheduling does not change results
+    seed = (
+        int(base_seed)
+        + 100_000 * (ord(strategy) - ord("A") + 1)
+        + 10_000 * (1 if arch_name == "small" else 2 if arch_name == "medium" else 3)
+        + 1_000 * int(steps // 100_000)
+        + 10 * int(l)
+        + int(n)
+        + int(init_idx)
+    )
+    model_key = jrandom.PRNGKey(seed + 1)
+    train_key = jrandom.PRNGKey(seed + 2)
+
+    # loss strategy
+    strategy = strategy.upper()
+    if strategy == "A":
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=0.0)
+    elif strategy == "B":
+        loss_fn = tl.WeightedSobolevLoss(alpha=0.0, beta=1.0)
+    elif strategy == "C":
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=1.0)
+    else:
+        raise ValueError(f"Unknown strategy '{strategy}'")
+
+    train_data = (
+        (F_cal_all, I_cal_all),
+        ((W_cal_all, P_cal_all), sample_weights),
+    )
+
+    tag = f"WITI_{strategy}_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx:02d}"
+    model_path   = out_dir / f"{tag}.eqx"
+    history_path = out_dir / f"{tag}_history.pkl"
+    meta_path    = out_dir / f"{tag}.json"
+
+    try:
+        model = tm.SobolevModel_WI_ti(
+            G_ti=G_ti,
+            key=model_key,
+            input_dim=5,
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=jax.nn.softplus,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+        trained_model, history = tm.train_WI(
+            model=model,
+            train_data=train_data,
+            key=train_key,
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            loss_fn=loss_fn,
+        )
+
+        final_model = klax.finalize(trained_model)
+
+        eqx.tree_serialise_leaves(str(model_path), final_model)
+        with open(history_path, "wb") as f:
+            pickle.dump(history, f)
+
+        meta = {
+            "task": "3_section2",
+            "model_id": "WITI",
+            "strategy": strategy,
+            "tag": tag,
+            "num_hidden_layers": int(l),
+            "nodes_per_layer": int(n),
+            "activation": "softplus",
+            "steps": int(steps),
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "loss": "WeightedSobolevLoss",
+            "loss_params": {"alpha": float(loss_fn.alpha), "beta": float(loss_fn.beta)},
+            "loss_weighting": "inverse path weights (uniaxial, pure shear, biaxial)",
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(history_path),
+        }
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        # fail-safe: do not crash the whole Parallel call
+        print(f"[Task3-Section2] FAIL: {tag} -> {e}")
+        return {"error": str(e), "tag": tag}
+
+def workflow_task_3_sweep_wi_ti_arch_steps(
+    dataset_1: dict,
+    *,
+    strategy: str = "C",
+    out_dir: str | Path = "artifacts/task3_section2",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    archs=None,
+    steps_list=None,
+    # joblib controls
+    n_jobs: int = -2,
+    backend: str = "loky",
+    verbose: int = 10,
+    base_seed: int | None = None,
+):
+    """
+    Parallel version of Task 3 (Section 2): arch × steps × init.
+    Uses the same variants as your serial workflow.
+    """
+    from pathlib import Path
+    from joblib import Parallel, delayed
+    import jax.numpy as jnp
+    import jax.random as jrandom
+
+    from . import data_t2 as td2  # for compute_path_weight
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    strategy = strategy.upper()
+    assert strategy in ("A", "B", "C"), "strategy must be 'A', 'B', or 'C'"
+
+    if archs is None:
+        archs = [
+            ("small",  2,  8),
+            ("medium", 3, 16),
+            ("large",  4, 32),
+        ]
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000]
+
+    G_ti = dataset_1["G_ti"]
+    master_key = dataset_1["master_key"]
+
+    # stable base seed (so parallelism doesn’t change results)
+    if base_seed is None:
+        base_seed = int(jrandom.randint(master_key, (), 0, 10_000_000))
+
+    # ------------------------------------------------------------
+    # Calibration data (same ordering as Task 3 Section 1):
+    # IMPORTANT: order [biaxial, uniaxial, pure_shear]
+    # ------------------------------------------------------------
+    F_bi  = dataset_1["F_bi"]
+    F_uni = dataset_1["F_uni"]
+    F_ps  = dataset_1["F_ps"]
+
+    P_bi  = dataset_1["P_bi"]
+    P_uni = dataset_1["P_uni"]
+    P_ps  = dataset_1["P_ps"]
+
+    W_bi  = dataset_1["W_bi"]
+    W_uni = dataset_1["W_uni"]
+    W_ps  = dataset_1["W_ps"]
+
+    I_bi  = dataset_1["I_bi"]
+    I_uni = dataset_1["I_uni"]
+    I_ps  = dataset_1["I_ps"]
+
+    F_cal_all = jnp.concatenate([F_bi, F_uni, F_ps], axis=0)
+    I_cal_all = jnp.concatenate([I_bi, I_uni, I_ps], axis=0)
+    W_cal_all = jnp.concatenate([W_bi, W_uni, W_ps], axis=0)
+    P_cal_all = jnp.concatenate([P_bi, P_uni, P_ps], axis=0)
+
+    # ------------------------------------------------------------
+    # Loss-weighting: inverse path weights
+    # ------------------------------------------------------------
+    w_uni = td2.compute_path_weight(P_uni)
+    w_ps  = td2.compute_path_weight(P_ps)
+    w_bi  = td2.compute_path_weight(P_bi)
+
+    w_uni_inv = 1.0 / w_uni
+    w_ps_inv  = 1.0 / w_ps
+    w_bi_inv  = 1.0 / w_bi
+
+    weights_bi  = w_bi_inv  * jnp.ones(P_bi.shape[0])
+    weights_uni = w_uni_inv * jnp.ones(P_uni.shape[0])
+    weights_ps  = w_ps_inv  * jnp.ones(P_ps.shape[0])
+
+    sample_weights = jnp.concatenate([weights_bi, weights_uni, weights_ps], axis=0).reshape(-1)
+
+    # ------------------------------------------------------------
+    # Build experiments list
+    # ------------------------------------------------------------
+    experiments = []
+    for arch_name, l, n in archs:
+        for steps in steps_list:
+            for init_idx in range(1, n_inits + 1):
+                experiments.append((
+                    strategy, arch_name, l, n, int(steps), int(init_idx),
+                    G_ti,
+                    F_cal_all, I_cal_all, W_cal_all, P_cal_all,
+                    sample_weights,
+                    int(batch_size), float(learning_rate),
+                    int(base_seed),
+                    str(out_dir),
+                ))
+
+    results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+        delayed(_run_single_task3_section2)(exp) for exp in experiments
+    )
+
+    return results
+
+def _run_single_task3_calibration_study(exp):
+    """
+    One training run for Task 3 (calibration subset study):
+      subset (tuple of path names) + init
+
+    exp is joblib-picklable (no closures).
+    """
+    import json
+    import pickle
+    from pathlib import Path
+
+    import jax
+    import jax.numpy as jnp
+    import jax.random as jrandom
+    import equinox as eqx
+    import klax
+
+    from . import models as tm
+    from . import data_t2 as td2
+    from . import losses as tl
+
+    (
+        subset, subset_tag,
+        best_l, best_n, best_strategy, steps,
+        # calibration paths data:
+        cal_paths,
+        G_ti,
+        batch_size, learning_rate,
+        init_idx,
+        base_seed,
+        out_dir,
+    ) = exp
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # loss strategy
+    best_strategy = best_strategy.upper()
+    if best_strategy == "A":
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=0.0)
+    elif best_strategy == "B":
+        loss_fn = tl.WeightedSobolevLoss(alpha=0.0, beta=1.0)
+    elif best_strategy == "C":
+        loss_fn = tl.WeightedSobolevLoss(alpha=1.0, beta=1.0)
+    else:
+        raise ValueError(f"Unknown strategy '{best_strategy}'")
+
+    # deterministic-ish seed
+    subset_hash = sum((i + 1) * (len(s) + ord(s[0])) for i, s in enumerate(subset))
+    seed = int(base_seed) + 1000 * subset_hash + 10 * int(init_idx)
+    model_key = jrandom.PRNGKey(seed + 1)
+    train_key = jrandom.PRNGKey(seed + 2)
+
+    # Build train_data for subset (exactly like your serial helper)
+    F_all = jnp.concatenate([cal_paths[p]["F"] for p in subset], axis=0)
+    I_all = jnp.concatenate([cal_paths[p]["I"] for p in subset], axis=0)
+    W_all = jnp.concatenate([cal_paths[p]["W"] for p in subset], axis=0)
+    P_all = jnp.concatenate([cal_paths[p]["P"] for p in subset], axis=0)
+
+    weights_list = []
+    weights_meta = {}
+    for p in subset:
+        P_path = cal_paths[p]["P"]
+        w_path = td2.compute_path_weight(P_path)
+        w_inv = 1.0 / w_path
+        weights_list.append(w_inv * jnp.ones(P_path.shape[0]))
+        weights_meta[p] = {"w": float(w_path), "w_inv": float(w_inv), "n_samples": int(P_path.shape[0])}
+
+    sample_weights = jnp.concatenate(weights_list, axis=0).reshape(-1)
+
+    train_data = (
+        (F_all, I_all),
+        ((W_all, P_all), sample_weights),
+    )
+
+    tag = (
+        f"WITI_CAL_{subset_tag}_{best_strategy}"
+        f"_l{best_l}_n{best_n}_steps{steps}"
+        f"_init{init_idx:02d}"
+    )
+
+    model_path   = out_dir / f"{tag}.eqx"
+    history_path = out_dir / f"{tag}_history.pkl"
+    meta_path    = out_dir / f"{tag}.json"
+
+    try:
+        model = tm.SobolevModel_WI_ti(
+            G_ti=G_ti,
+            key=model_key,
+            input_dim=5,
+            output_dim="scalar",
+            num_hidden_layers=int(best_l),
+            nodes_per_layer=int(best_n),
+            activation=jax.nn.softplus,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+        trained_model, history = tm.train_WI(
+            model=model,
+            train_data=train_data,
+            key=train_key,
+            steps=int(steps),
+            batch_size=int(batch_size),
+            learning_rate=float(learning_rate),
+            loss_fn=loss_fn,
+        )
+
+        final_model = klax.finalize(trained_model)
+
+        eqx.tree_serialise_leaves(str(model_path), final_model)
+        with open(history_path, "wb") as f:
+            pickle.dump(history, f)
+
+        meta = {
+            "task": "3_calibration_study",
+            "model_id": "WITI",
+            "tag": tag,
+            "subset": list(subset),
+            "subset_tag": subset_tag,
+            "architecture": {"l": int(best_l), "n": int(best_n), "activation": "softplus"},
+            "strategy": best_strategy,
+            "loss": "WeightedSobolevLoss",
+            "loss_params": {"alpha": float(loss_fn.alpha), "beta": float(loss_fn.beta)},
+            "steps": int(steps),
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "loss_weighting": "inverse path weights computed on subset paths",
+            "weights_by_path": weights_meta,
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(history_path),
+        }
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        print(f"[Task3-CalibStudy] FAIL: {tag} -> {e}")
+        return {"error": str(e), "tag": tag}
+
+def workflow_task_3_calibration_set_study(
+    dataset_1: dict,
+    *,
+    best_l: int = 3,
+    best_n: int = 16,
+    best_strategy: str = "C",
+    steps: int = 300_000,
+    out_dir: str | Path = "artifacts/task3_calibration_study",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    include_single_paths: bool = True,
+    include_pair_paths: bool = True,
+    include_all_paths: bool = True,
+    # joblib controls
+    n_jobs: int = -2,
+    backend: str = "loky",
+    verbose: int = 10,
+    base_seed: int | None = None,
+):
+    """
+    Parallel version of Task 3 (final section): calibration subset study.
+    Uses the exact same subsets + naming as your serial workflow.
+    """
+    from pathlib import Path
+    import itertools
+    from joblib import Parallel, delayed
+    import jax.random as jrandom
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    best_strategy = best_strategy.upper()
+    assert best_strategy in ("A", "B", "C"), "best_strategy must be 'A', 'B', or 'C'"
+
+    G_ti = dataset_1["G_ti"]
+    master_key = dataset_1["master_key"]
+
+    if base_seed is None:
+        base_seed = int(jrandom.randint(master_key, (), 0, 10_000_000))
+
+    # Available calibration paths (exactly like your serial workflow)
+    cal_paths = {
+        "biaxial": {
+            "F": dataset_1["F_bi"],
+            "I": dataset_1["I_bi"],
+            "W": dataset_1["W_bi"],
+            "P": dataset_1["P_bi"],
+        },
+        "uniaxial": {
+            "F": dataset_1["F_uni"],
+            "I": dataset_1["I_uni"],
+            "W": dataset_1["W_uni"],
+            "P": dataset_1["P_uni"],
+        },
+        "pure_shear": {
+            "F": dataset_1["F_ps"],
+            "I": dataset_1["I_ps"],
+            "W": dataset_1["W_ps"],
+            "P": dataset_1["P_ps"],
+        },
+    }
+
+    path_names = list(cal_paths.keys())
+
+    # Build subsets (exactly like before)
+    subsets = []
+    if include_single_paths:
+        subsets += [(p,) for p in path_names]
+    if include_pair_paths:
+        subsets += list(itertools.combinations(path_names, 2))
+    if include_all_paths:
+        subsets += [tuple(path_names)]
+
+    # Build experiments list: subset × init
+    experiments = []
+    for subset in subsets:
+        subset_tag = "+".join(subset)  # exact naming you used before
+        for init_idx in range(1, n_inits + 1):
+            experiments.append((
+                tuple(subset), subset_tag,
+                int(best_l), int(best_n), best_strategy, int(steps),
+                cal_paths,
+                G_ti,
+                int(batch_size), float(learning_rate),
+                int(init_idx),
+                int(base_seed),
+                str(out_dir),
+            ))
+
+    results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+        delayed(_run_single_task3_calibration_study)(exp) for exp in experiments
+    )
+
+    return results
+
+def _run_single_task5_2_wicub(exp):
+    """
+    One training run for Task 5.2 (WI_cubic):
+      (arch, steps, init) with persistence.
+
+    Must be top-level for joblib (Windows loky).
+    """
+    import json
+    from pathlib import Path
+
+    import jax
+    import equinox as eqx
+    import klax
+
+    from . import models as tm
+    from . import losses as tl
+
+    (
+        arch_name, l, n, steps, init_idx,
+        model_key, train_key,
+        G_cub,
+        train_data,
+        batch_size, learning_rate,
+        loss_alpha, loss_beta,
+        strategy_tag,
+        out_dir,
+        dataset3_meta,
+    ) = exp
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
+
+        model = tm.SobolevModel_WI_Cubic(
+            G_cub=G_cub,
+            key=model_key,
+            input_dim=6,
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=jax.nn.softplus,
+            is_icnn=False,
+            is_ficnn=True,
+        )
+
+        trained_model, history = tm.train_model(
+            model,
+            train_data,
+            train_key,
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            loss_fn=loss_fn,
+        )
+
+        final_model = klax.finalize(trained_model)
+
+        tag = f"WICUB_{strategy_tag}_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx:02d}"
+        model_path = out_dir / f"{tag}.eqx"
+        hist_path  = out_dir / f"{tag}_history.pkl"
+        meta_path  = out_dir / f"{tag}.json"
+
+        # Use your project helpers if available; otherwise serialize directly.
+        # (Your serial workflow uses _save_eqx_model/_save_history.)
+        try:
+            _save_eqx_model(final_model, model_path)   # noqa: F821
+            _save_history(history, hist_path)          # noqa: F821
+        except Exception:
+            eqx.tree_serialise_leaves(str(model_path), final_model)
+            import pickle
+            with open(hist_path, "wb") as f:
+                pickle.dump(history, f)
+
+        meta = {
+            "task": "5.2",
+            "model_id": "WICUB",
+            "tag": tag,
+            "architecture": {"l": l, "n": n, "activation": "softplus"},
+            "steps": int(steps),
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "loss": "WeightedSobolevLoss",
+            "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
+            "dataset_3": dataset3_meta,
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(hist_path),
+        }
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        print(f"[Task5.2][WICUB] FAIL arch={arch_name} steps={steps} init={init_idx:02d}: {e}")
+        return {
+            "task": "5.2",
+            "model_id": "WICUB",
+            "arch": arch_name,
+            "l": int(l),
+            "n": int(n),
+            "steps": int(steps),
+            "init_idx": int(init_idx),
+            "error": str(e),
+        }
+
+def workflow_task_5_2_sweep_wi_cubic(
+    dataset_3: dict,
+    *,
+    G_cub: jnp.ndarray,
+    out_dir: str | Path = "artifacts/task5_2",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    steps_list=None,
+    archs=None,
+    loss_alpha: float = 1.0,
+    loss_beta: float = 0.0,
+    master_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
+    # ---- joblib knobs ----
+    n_jobs: int = -2,
+    backend: str = "loky",
+    verbose: int | None = None,
+    max_nbytes: str | None = "50M",
+):
+    """
+    Task 5.2: Parallel sweep WI_cubic model configurations on Dataset 3.
+
+    Parallel unit = (arch, steps, init).
+    """
+    from joblib import Parallel, delayed
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000]
+
+    if archs is None:
+        archs = [
+            ("small",  2,  8),
+            ("medium", 3, 16),
+            ("large",  4, 32),
+        ]
+
+    train_data = dataset_3["train_data_WI_cubic"]
+    # test_data exists but isn’t needed for training persistence
+    # test_data = dataset_3["test_data_WI_cubic"]
+
+    strategy_tag = f"a{loss_alpha:g}_b{loss_beta:g}"
+
+    # Preserve deterministic key assignment like your serial workflow
+    total_runs = len(archs) * len(steps_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    # Small meta payload (pickle-friendly)
+    dataset3_meta = {
+        "path_h5": dataset_3.get("path_h5", None),
+        "alpha_scale": float(dataset_3["alpha"]),
+        "P_max": float(dataset_3["P_max"]),
+        "n_cal_paths": len(dataset_3["calibration_keys"]),
+        "n_test_paths": len(dataset_3["test_keys"]),
+        "calibration_keys": dataset_3["calibration_keys"],
+        "test_keys": dataset_3["test_keys"],
+    }
+
+    experiments = []
+    for arch_name, l, n in archs:
+        for steps in steps_list:
+            for init_idx in range(1, n_inits + 1):
+                model_key = keys[key_cursor]
+                train_key = keys[key_cursor + 1]
+                key_cursor += 2
+
+                experiments.append((
+                    arch_name, int(l), int(n), int(steps), int(init_idx),
+                    model_key, train_key,
+                    G_cub,
+                    train_data,
+                    int(batch_size), float(learning_rate),
+                    float(loss_alpha), float(loss_beta),
+                    strategy_tag,
+                    str(out_dir),
+                    dataset3_meta,
+                ))
+
+    if verbose is None:
+        verbose = len(experiments)
+
+    print(
+        f"Task 5.2: {len(archs)} archs × {len(steps_list)} steps × {n_inits} inits "
+        f"= {len(experiments)} trainings (n_jobs={n_jobs}, backend={backend})"
+    )
+
+    results = Parallel(
+        n_jobs=n_jobs,
+        backend=backend,
+        verbose=verbose,
+        max_nbytes=max_nbytes,
+    )(
+        delayed(_run_single_task5_2_wicub)(exp) for exp in experiments
+    )
+
+    return results
+
+def _run_single_task5_3_wf(exp):
+    """
+    One training run for Task 5.3 (WF):
+      (arch, steps, init) with persistence.
+
+    Must be top-level for joblib on Windows (loky).
+    """
+    import json
+    import pickle
+    from pathlib import Path
+
+    import jax
+    import equinox as eqx
+    import klax
+
+    from . import models as tm
+    from . import losses as tl
+
+    (
+        arch_name, l, n, steps, init_idx,
+        model_key, train_key,
+        # training arrays
+        F_cal, W_cal, P_cal, weights_cal,
+        # hyperparams
+        batch_size, learning_rate,
+        loss_alpha, loss_beta,
+        strategy_tag,
+        out_dir,
+        dataset3_meta,
+    ) = exp
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Training data format for WeightedSobolevLoss:
+        # batch = (F, ((W_true, P_true), weights))
+        train_data_WF = (
+            F_cal,
+            ((W_cal, P_cal), weights_cal),
+        )
+
+        loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
+
+        # WF model (F-only input; internal feature construction)
+        WF_model = tm.SobolevModel_WF(
+            key=model_key,
+            input_dim=19,           # internal (F, cofF, detF)
+            output_dim="scalar",
+            num_hidden_layers=l,
+            nodes_per_layer=n,
+            activation=jax.nn.softplus,
+            is_icnn=True,
+            is_ficnn=False,
+        )
+
+        trained_model, history = tm.train_model(
+            model=WF_model,
+            train_data=train_data_WF,
+            key=train_key,
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            loss_fn=loss_fn,
+        )
+
+        final_model = klax.finalize(trained_model)
+
+        tag = f"WF_{strategy_tag}_{arch_name}_l{l}_n{n}_steps{steps}_init{init_idx:02d}"
+        model_path = out_dir / f"{tag}.eqx"
+        hist_path  = out_dir / f"{tag}_history.pkl"
+        meta_path  = out_dir / f"{tag}.json"
+
+        # Prefer your helpers; fall back to direct saving if needed.
+        try:
+            _save_eqx_model(final_model, model_path)  # noqa: F821
+            _save_history(history, hist_path)         # noqa: F821
+        except Exception:
+            eqx.tree_serialise_leaves(str(model_path), final_model)
+            with open(hist_path, "wb") as f:
+                pickle.dump(history, f)
+
+        meta = {
+            "task": "5.3",
+            "model_id": "WF",
+            "tag": tag,
+            "architecture": {"l": l, "n": n, "activation": "softplus"},
+            "steps": int(steps),
+            "init_idx": int(init_idx),
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "loss": "WeightedSobolevLoss",
+            "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
+            "icnn": {"is_icnn": True, "is_ficnn": False},
+            "dataset_3": dataset3_meta,
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(hist_path),
+        }
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        print(f"[Task5.3][WF] FAIL arch={arch_name} steps={steps} init={init_idx:02d}: {e}")
+        return {
+            "task": "5.3",
+            "model_id": "WF",
+            "arch": arch_name,
+            "l": int(l),
+            "n": int(n),
+            "steps": int(steps),
+            "init_idx": int(init_idx),
+            "error": str(e),
+        }
+
+def workflow_task_5_3_sweep_wf(
+    dataset_3: dict,
+    *,
+    out_dir: str | Path = "artifacts/task5_3",
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    steps_list=None,
+    archs=None,
+    loss_alpha: float = 1.0,
+    loss_beta: float = 0.0,
+    master_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
+    # ---- joblib knobs ----
+    n_jobs: int = -2,
+    backend: str = "loky",
+    verbose: int | None = None,
+    max_nbytes: str | None = "50M",
+):
+    """
+    Task 5.3: Parallel sweep WF model configurations on Dataset 3 (training only).
+
+    Parallel unit = (arch, steps, init).
+    """
+    from joblib import Parallel, delayed
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if steps_list is None:
+        steps_list = [100_000, 300_000, 500_000]
+
+    if archs is None:
+        archs = [
+            ("small",  2,  8),
+            ("medium", 3, 16),
+            ("large",  4, 32),
+        ]
+
+    # Unpack dataset_3 (already scaled and properly aligned)
+    F_cal = dataset_3["F_cal"]
+    W_cal = dataset_3["W_cal"]
+    P_cal = dataset_3["P_cal"]
+    weights_cal = dataset_3["weights_cal"]
+
+    strategy_tag = f"a{loss_alpha:g}_b{loss_beta:g}"  # e.g. a1_b0
+
+    # Preserve deterministic key assignment like your serial workflow
+    total_runs = len(archs) * len(steps_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    # Small meta payload (pickle-friendly)
+    dataset3_meta = {
+        "path_h5": dataset_3.get("path_h5", None),
+        "alpha_scale": float(dataset_3["alpha"]),
+        "P_max": float(dataset_3["P_max"]),
+        "n_cal_paths": len(dataset_3["calibration_keys"]),
+        "n_test_paths": len(dataset_3["test_keys"]),
+        "calibration_keys": dataset_3["calibration_keys"],
+        "test_keys": dataset_3["test_keys"],
+    }
+
+    experiments = []
+    for arch_name, l, n in archs:
+        for steps in steps_list:
+            for init_idx in range(1, n_inits + 1):
+                model_key = keys[key_cursor]
+                train_key = keys[key_cursor + 1]
+                key_cursor += 2
+
+                experiments.append((
+                    arch_name, int(l), int(n), int(steps), int(init_idx),
+                    model_key, train_key,
+                    F_cal, W_cal, P_cal, weights_cal,
+                    int(batch_size), float(learning_rate),
+                    float(loss_alpha), float(loss_beta),
+                    strategy_tag,
+                    str(out_dir),
+                    dataset3_meta,
+                ))
+
+    if verbose is None:
+        verbose = len(experiments)
+
+    print(
+        f"Task 5.3: {len(archs)} archs × {len(steps_list)} steps × {n_inits} inits "
+        f"= {len(experiments)} trainings (n_jobs={n_jobs}, backend={backend})"
+    )
+
+    results = Parallel(
+        n_jobs=n_jobs,
+        backend=backend,
+        verbose=verbose,
+        max_nbytes=max_nbytes,
+    )(
+        delayed(_run_single_task5_3_wf)(exp) for exp in experiments
+    )
+
+    return results
+
+def _run_single_task5_4_wf_augmented(exp):
+    """
+    One training run for Task 5.4:
+      (observer_count, init_idx) for WF on augmented dataset.
+
+    Must be top-level for joblib (Windows loky).
+    """
+    import json
+    import pickle
+    from pathlib import Path
+
+    import jax
+    import jax.random as jrandom
+    import equinox as eqx
+    import klax
+
+    from . import models as tm
+    from . import losses as tl
+
+    (
+        observers,
+        init_idx,
+        # fixed best config
+        best_l, best_n, steps,
+        # augmented training data
+        F_aug, W_aug, P_aug, weights_aug,
+        # hyperparams
+        batch_size, learning_rate,
+        loss_alpha, loss_beta,
+        # seeding
+        model_key, train_key,
+        # output
+        out_dir,
+        dataset3_meta,
+    ) = exp
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Training data format for WF + Sobolev loss
+        train_data = (
+            F_aug,
+            ((W_aug, P_aug), weights_aug),
+        )
+
+        loss_fn = tl.WeightedSobolevLoss(alpha=loss_alpha, beta=loss_beta)
+
+        WF_model = tm.SobolevModel_WF(
+            key=model_key,
+            input_dim=19,
+            output_dim="scalar",
+            num_hidden_layers=best_l,
+            nodes_per_layer=best_n,
+            activation=jax.nn.softplus,
+            is_icnn=True,
+            is_ficnn=False,
+        )
+
+        trained_model, history = tm.train_model(
+            model=WF_model,
+            train_data=train_data,
+            key=train_key,
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            loss_fn=loss_fn,
+        )
+
+        final_model = klax.finalize(trained_model)
+
+        tag = (
+            f"WF_AUG_obs{observers}"
+            f"_l{best_l}_n{best_n}_steps{steps}"
+            f"_init{init_idx:02d}"
+        )
+
+        model_path = out_dir / f"{tag}.eqx"
+        hist_path  = out_dir / f"{tag}_history.pkl"
+        meta_path  = out_dir / f"{tag}.json"
+
+        try:
+            _save_eqx_model(final_model, model_path)   # noqa: F821
+            _save_history(history, hist_path)          # noqa: F821
+        except Exception:
+            eqx.tree_serialise_leaves(str(model_path), final_model)
+            with open(hist_path, "wb") as f:
+                pickle.dump(history, f)
+
+        meta = {
+            "task": "5.4",
+            "model_id": "WF",
+            "tag": tag,
+            "augmentation": {
+                "observers": int(observers),
+                "type": "multiscale_rotation_sampling",
+            },
+            "architecture": {
+                "l": int(best_l),
+                "n": int(best_n),
+                "activation": "softplus",
+            },
+            "steps": int(steps),
+            "init_idx": int(init_idx),
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "loss": "WeightedSobolevLoss",
+            "loss_params": {"alpha": float(loss_alpha), "beta": float(loss_beta)},
+            "icnn": {"is_icnn": True, "is_ficnn": False},
+            "dataset_3": dataset3_meta,
+            "saved_model_path": str(model_path),
+            "saved_history_path": str(hist_path),
+        }
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        return meta
+
+    except Exception as e:
+        print(f"[Task5.4][WF_AUG] FAIL obs={observers} init={init_idx:02d}: {e}")
+        return {
+            "task": "5.4",
+            "model_id": "WF",
+            "observers": int(observers),
+            "init_idx": int(init_idx),
+            "error": str(e),
+        }
+
+def workflow_task_5_4_train_wf_augmented(
+    dataset_3: dict,
+    *,
+    best_l: int,
+    best_n: int,
+    steps: int,
+    observers_list=(8, 16, 32, 64),
+    n_inits: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    loss_alpha: float = 1.0,
+    loss_beta: float = 0.0,
+    out_dir: str | Path = "artifacts/task5_4",
+    master_key=jrandom.PRNGKey(0),
+    aug_key_seed: int = 1234,
+    # ---- joblib knobs ----
+    n_jobs: int = -2,
+    backend: str = "loky",
+    verbose: int | None = None,
+    max_nbytes: str | None = "50M",
+):
+    """
+    Task 5.4: Parallel WF training on augmented datasets.
+
+    Parallel unit = (observer setting, init).
+    """
+    from pathlib import Path
+    from joblib import Parallel, delayed
+    import jax.numpy as jnp
+    import jax.random as jrandom
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Unpack base dataset
+    F_base = dataset_3["F_cal"]
+    W_base = dataset_3["W_cal"]
+    P_base = dataset_3["P_cal"]
+    weights_base = dataset_3["weights_cal"]
+
+    # Metadata payload (small + pickle-safe)
+    dataset3_meta = {
+        "path_h5": dataset_3.get("path_h5", None),
+        "alpha_scale": float(dataset_3["alpha"]),
+        "P_max": float(dataset_3["P_max"]),
+        "calibration_keys": dataset_3["calibration_keys"],
+        "test_keys": dataset_3["test_keys"],
+    }
+
+    # Deterministic key splitting (same philosophy as other tasks)
+    total_runs = len(observers_list) * n_inits
+    keys = jrandom.split(master_key, total_runs * 2 + 1)
+    key_cursor = 1
+
+    experiments = []
+
+    for obs in observers_list:
+        # --- build augmented dataset exactly like serial workflow ---
+        F_aug, W_aug, P_aug, weights_aug = wf._build_augmented_wf_dataset(  # noqa: F821
+            F_base,
+            W_base,
+            P_base,
+            weights_base,
+            observers=obs,
+            key_seed=aug_key_seed,
+        )
+
+        for init_idx in range(1, n_inits + 1):
+            model_key = keys[key_cursor]
+            train_key = keys[key_cursor + 1]
+            key_cursor += 2
+
+            experiments.append((
+                int(obs),
+                int(init_idx),
+                int(best_l), int(best_n), int(steps),
+                F_aug, W_aug, P_aug, weights_aug,
+                int(batch_size), float(learning_rate),
+                float(loss_alpha), float(loss_beta),
+                model_key, train_key,
+                str(out_dir),
+                dataset3_meta,
+            ))
+
+    if verbose is None:
+        verbose = len(experiments)
+
+    print(
+        f"Task 5.4: {len(observers_list)} observer settings × {n_inits} inits "
+        f"= {len(experiments)} trainings (n_jobs={n_jobs}, backend={backend})"
+    )
+
+    results = Parallel(
+        n_jobs=n_jobs,
+        backend=backend,
+        verbose=verbose,
+        max_nbytes=max_nbytes,
+    )(
+        delayed(_run_single_task5_4_wf_augmented)(exp) for exp in experiments
+    )
+
+    return results
