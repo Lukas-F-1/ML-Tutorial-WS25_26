@@ -1480,3 +1480,4 @@ def plot_stretch_distribution_components(F_data, title="Principal Stretch Distri
     plt.suptitle(title, fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.show()
+

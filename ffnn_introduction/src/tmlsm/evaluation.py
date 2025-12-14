@@ -11,6 +11,7 @@ from . import eval_workflows as ewf
 import re
 import matplotlib.ticker as mticker
 from matplotlib.transforms import blended_transform_factory
+import matplotlib.colors as mcolors
 
 
 
@@ -2196,3 +2197,618 @@ def plot_P_component_mirrored_density_grid(
 
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     plt.show()
+
+
+def collect_component_matrix_task2_2_ms(
+    runs,
+    *,
+    dataset_1: dict,
+    test_which: str = "full",
+    metric: str = "bias",   # "bias" or "rmse"
+    reduce: str = "median", # "median" (recommended) or "mean"
+    arch_order=("small", "medium", "large"),
+    steps_list=(100_000, 300_000, 500_000, 700_000, 900_000),
+):
+    """
+    Returns:
+      M[(arch, steps)] -> (3,3) matrix (bias or RMSE), reduced over inits
+      vmax -> robust global scale (95th percentile), for consistent coloring
+    """
+    metric = metric.lower().strip()
+    reduce = reduce.lower().strip()
+    if metric not in ("bias", "rmse"):
+        raise ValueError("metric must be 'bias' or 'rmse'.")
+    if reduce not in ("median", "mean"):
+        raise ValueError("reduce must be 'median' or 'mean'.")
+
+    # test set once
+    any_run = runs[0]
+    X_test, Y_test = ewf.get_test_ms(any_run, dataset_1=dataset_1, which=test_which)
+    P_true = Y_test.reshape(Y_test.shape[0], 3, 3)
+
+    # group by (arch, steps)
+    def _parse_arch_steps(r):
+        arch = None
+        for a in arch_order:
+            if f"MS_{a}_" in r.tag:
+                arch = a
+                break
+        steps = int(getattr(r, "steps", -1) or -1)
+        if steps < 0:
+            m = re.search(r"_steps(\d+)", r.tag)
+            steps = int(m.group(1)) if m else -1
+        if arch is None or steps < 0:
+            return None
+        return (arch, steps)
+
+    groups = ewf.group_runs(runs, by=_parse_arch_steps)
+    groups.pop(None, None)
+
+    M = {}
+    all_vals = []
+
+    for arch in arch_order:
+        for steps in steps_list:
+            key = (arch, int(steps))
+            cfg_runs = groups.get(key, [])
+            if not cfg_runs:
+                continue
+
+            per_init = []
+            for r in cfg_runs:
+                P_pred = ewf.predict_ms_stress(r.model, X_test)  # (N,3,3)
+                err = np.asarray(P_pred) - np.asarray(P_true)   # (N,3,3)
+
+                if metric == "bias":
+                    A = np.mean(err, axis=0)                    # (3,3)
+                else:  # rmse
+                    A = np.sqrt(np.mean(err**2, axis=0))        # (3,3)
+
+                per_init.append(A)
+
+            per_init = np.stack(per_init, axis=0)              # (K,3,3)
+            A_red = np.median(per_init, axis=0) if reduce == "median" else np.mean(per_init, axis=0)
+
+            M[key] = A_red
+            all_vals.append(np.abs(A_red).reshape(-1) if metric == "bias" else A_red.reshape(-1))
+
+    if not M:
+        raise RuntimeError("No matrices computed. Check tag parsing and steps_list.")
+
+    all_vals = np.concatenate(all_vals, axis=0)
+    all_vals = all_vals[np.isfinite(all_vals)]
+    vmax = float(np.percentile(all_vals, 95)) if all_vals.size else 1.0
+    if vmax <= 0 or not np.isfinite(vmax):
+        vmax = 1.0
+
+    return M, vmax
+
+
+import matplotlib.colors as mcolors
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import matplotlib.colors as mcolors
+
+def plot_component_tile_grid_arch_steps(
+    M: dict,
+    *,
+    vmax: float,
+    metric: str = "bias",          # "bias" or "rmse"
+    arch_order=("small", "medium", "large"),
+    steps_list=(100_000, 300_000, 500_000, 700_000, 900_000),
+    title: str = "",
+    cmap_bias="RdBu_r",
+    cmap_rmse="viridis",
+    figsize=(9.2, 11.0),
+    show_component_labels: bool = False,
+    log_color: bool = False,
+    log_linthresh: float | None = None,   # only used for bias+log (SymLogNorm)
+    wspace: float = 0.12,                 # NEW: reduce column gaps
+):
+    metric = metric.lower().strip()
+    if metric not in ("bias", "rmse"):
+        raise ValueError("metric must be 'bias' or 'rmse'.")
+
+    # Column titles per your requested mapping
+    arch_titles = {"small": "l=2, n=8", "medium": "l=3, n=16", "large": "l=4, n=32"}
+
+    n_rows = len(steps_list)
+    n_cols = len(arch_order)
+
+    # Choose colormap + normalization
+    if metric == "bias":
+        cmap = cmap_bias
+        if not log_color:
+            norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+        else:
+            if log_linthresh is None:
+                log_linthresh = max(vmax * 0.03, 1e-12)
+            norm = mcolors.SymLogNorm(linthresh=log_linthresh, vmin=-vmax, vmax=vmax, base=10)
+        cbar_label = r"bias = median$_{inits}$ mean$_{samples}$(pred − true)"
+    else:
+        cmap = cmap_rmse
+        # RMSE is nonnegative; for log color use LogNorm, else plain Normalize
+        if not log_color:
+            norm = mcolors.Normalize(vmin=0.0, vmax=vmax)
+        else:
+            vmin = max(vmax * 1e-4, 1e-12)
+            norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
+        cbar_label = r"RMSE = median$_{inits}$ sqrt(mean$_{samples}$((pred − true)$^2$))"
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    fig.suptitle(title, fontsize=14)
+
+    # Tighten inter-panel spacing (fixes the big empty column gaps)
+    # tighter spacing between subplots (columns + rows)
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.86,   # keep room for the colorbar axis you add later
+        top=0.93,
+        bottom=0.06,
+        wspace=wspace,  # <-- decrease to tighten columns (try 0.12–0.20)
+        hspace=0.22,  # row spacing
+    )
+
+
+    im_for_cbar = None
+
+    for r, steps in enumerate(steps_list):
+        for c, arch in enumerate(arch_order):
+            ax = axes[r, c]
+            key = (arch, int(steps))
+            A = M.get(key)
+
+            if A is None:
+                A = np.zeros((3, 3), dtype=float)
+                ax.imshow(A, cmap=cmap, norm=norm)
+                ax.text(0.5, 0.5, "—", ha="center", va="center", fontsize=14, transform=ax.transAxes)
+            else:
+                im_for_cbar = ax.imshow(A, cmap=cmap, norm=norm)
+
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_aspect("equal")
+
+            if r == 0:
+                ax.set_title(arch_titles.get(arch, arch), fontsize=12, pad=8)
+            if c == 0:
+                ax.set_ylabel(f"{steps//1000}k", fontsize=11, rotation=0, labelpad=26, va="center")
+
+            if show_component_labels:
+                for i in range(3):
+                    for j in range(3):
+                        ax.text(j, i, f"$P_{{{i+1}{j+1}}}$",
+                                ha="center", va="center", fontsize=8, color="black")
+
+    # ---- Figure-level colorbar axis (does NOT affect any subplot geometry) ----
+    # Reserve space on the right for the colorbar, then place it explicitly.
+    # cbar_pad is the right margin reserved; increase it for more room.
+    fig.subplots_adjust(right=0.88)  # <-- controls how much space remains for the grid
+
+    # Add a dedicated axis for the colorbar: [left, bottom, width, height] in figure coords
+    # Move it right by increasing 'left'; change thickness via 'width'.
+    cax = fig.add_axes([0.90, 0.18, 0.02, 0.64])
+
+    if im_for_cbar is None:
+        im_for_cbar = axes[0, 0].imshow(np.zeros((3, 3)), cmap=cmap, norm=norm)
+
+    cbar = fig.colorbar(im_for_cbar, cax=cax)
+    cbar.set_label(cbar_label, rotation=90)
+
+
+    plt.show()
+
+
+import numpy as np
+import re
+
+def collect_component_matrix_task3_section2_witi(
+    runs,
+    *,
+    dataset_1: dict,
+    test_which: str = "full",       # "biax" | "mixed" | "full"
+    metric: str = "bias",           # "bias" | "rmse"
+    reduce: str = "median",         # "median" (recommended) | "mean"
+    steps_list=(100_000, 300_000, 500_000, 700_000, 900_000),
+    arch_order=("small", "medium", "large"),
+):
+    """
+    Task 3 Section 2 (WITI) -> returns per (arch, steps) a (3,3) matrix for P-components.
+
+    metric="bias":  median_inits(mean_samples(P_pred - P_true))   -> (3,3)
+    metric="rmse":  median_inits(sqrt(mean_samples((P_pred - P_true)^2))) -> (3,3)
+
+    Returns:
+      M[(arch, steps)] -> (3,3)
+      vmax -> robust global scale (95th percentile), for consistent coloring
+    """
+    metric = metric.lower().strip()
+    reduce = reduce.lower().strip()
+    if metric not in ("bias", "rmse"):
+        raise ValueError("metric must be 'bias' or 'rmse'.")
+    if reduce not in ("median", "mean"):
+        raise ValueError("reduce must be 'median' or 'mean'.")
+
+    # Build test set once
+    any_run = runs[0]
+    (F_test, I_test), (W_true, P_true) = ewf.get_test_witi(
+        any_run, dataset_1=dataset_1, which=test_which
+    )
+    P_true = np.asarray(P_true)  # (N,3,3)
+
+    # Map (l,n) -> architecture bucket to match your Task 2.2 column headers
+    ln_to_arch = {(2, 8): "small", (3, 16): "medium", (4, 32): "large"}
+
+    def _parse_arch_steps(r):
+        m = re.search(r"_l(\d+)_n(\d+)_steps(\d+)", r.tag)
+        if not m:
+            return None
+        l = int(m.group(1))
+        n = int(m.group(2))
+        steps = int(m.group(3))
+        arch = ln_to_arch.get((l, n))
+        if arch is None:
+            return None
+        return (arch, steps)
+
+    groups = ewf.group_runs(runs, by=_parse_arch_steps)
+    groups.pop(None, None)
+
+    M = {}
+    all_vals = []
+
+    for arch in arch_order:
+        for steps in steps_list:
+            key = (arch, int(steps))
+            cfg_runs = groups.get(key, [])
+            if not cfg_runs:
+                continue
+
+            per_init = []
+            for r in cfg_runs:
+                # WITI model: ((F,I)) -> (Wp, Pp)
+                Wp, Pp = jax.vmap(r.model)((F_test, I_test))  # Pp: (N,3,3)
+                Pp = np.asarray(Pp)
+                err = Pp - P_true  # (N,3,3)
+
+                if metric == "bias":
+                    A = np.mean(err, axis=0)                 # (3,3)
+                else:
+                    A = np.sqrt(np.mean(err**2, axis=0))     # (3,3)
+
+                per_init.append(A)
+
+            per_init = np.stack(per_init, axis=0)            # (K,3,3)
+            A_red = np.median(per_init, axis=0) if reduce == "median" else np.mean(per_init, axis=0)
+
+            M[key] = A_red
+            all_vals.append(np.abs(A_red).reshape(-1) if metric == "bias" else A_red.reshape(-1))
+
+    if not M:
+        raise RuntimeError("No matrices computed. Check tag parsing, steps_list, and ln_to_arch mapping.")
+
+    all_vals = np.concatenate(all_vals, axis=0)
+    all_vals = all_vals[np.isfinite(all_vals)]
+    vmax = float(np.percentile(all_vals, 95)) if all_vals.size else 1.0
+    if vmax <= 0 or not np.isfinite(vmax):
+        vmax = 1.0
+
+    return M, vmax
+
+#Helper to obtain calibration data
+#Once all trainings are implemented consistently we should add a standardzed utility that can do this for any model
+def witi_calibration_provider_factory(ds1):
+    def provider(label, res_obj):
+        # Calibration set used in Task 3: [biaxial, uniaxial, pure_shear]
+        F_bi  = ds1["F_bi"]
+        F_uni = ds1["F_uni"]
+        F_ps  = ds1["F_ps"]
+
+        W_bi  = ds1["W_bi"]
+        W_uni = ds1["W_uni"]
+        W_ps  = ds1["W_ps"]
+
+        F_cal = jnp.concatenate([jnp.array(F_bi), jnp.array(F_uni), jnp.array(F_ps)], axis=0)
+        W_cal = jnp.concatenate([jnp.array(W_bi).reshape(-1), jnp.array(W_uni).reshape(-1), jnp.array(W_ps).reshape(-1)], axis=0)
+
+        detF_cal = jnp.linalg.det(F_cal)
+        return {"detF_cal": detF_cal, "W_cal": W_cal}
+    return provider
+
+# ---------------------------------------------------------------------
+# Task 5.2 — Dataset 3 helpers (train/test are defined by prepare_dataset_3)
+# ---------------------------------------------------------------------
+
+def get_task5_2_train_test_sets(
+    dataset_3: dict,
+    *,
+    G_cub: jnp.ndarray,            # kept for API compatibility; not used unless you later add fallbacks
+    include_test_by_key: bool = False,
+):
+    """
+    Returns the EXACT sets used by Task 5.2 training/eval.
+
+    Train (interpolation): dataset_3["train_data_WI_cubic"]
+      = ((F_cal, I_cal), ((W_cal, P_cal), weights_cal))
+
+    Test (extrapolation): dataset_3["test_data_WI_cubic"]
+      = ((F_test, I_test), (W_test, P_test))
+
+    If include_test_by_key=True, also returns per-test-path splits WITHOUT recomputing invariants,
+    by slicing the already-concatenated (F_test, I_test, W_test, P_test) according to the
+    concatenation order used in prepare_dataset_3 (dataset_3["test_keys"]).
+    """
+    # --- train (calibration) ---
+    (F_tr, I_tr), ((W_tr, P_tr), _weights_tr) = dataset_3["train_data_WI_cubic"]
+
+    # --- test (full test concat) ---
+    (F_te, I_te), (W_te, P_te) = dataset_3["test_data_WI_cubic"]
+
+    out = {
+        "train": ((F_tr, I_tr), (W_tr, P_tr)),
+        "test":  ((F_te, I_te), (W_te, P_te)),
+    }
+
+    if include_test_by_key:
+        # Slice per key using the same concatenation order as prepare_dataset_3:
+        # F_test = concat([F_dict[k] for k in test_keys], axis=0)
+        # and I_test computed once on that concatenation.
+        test_by_key = {}
+        cursor = 0
+        for k in dataset_3["test_keys"]:
+            n_k = int(dataset_3["F_dict"][k].shape[0])
+            sl = slice(cursor, cursor + n_k)
+            test_by_key[k] = ((F_te[sl], I_te[sl]), (W_te[sl], P_te[sl]))
+            cursor += n_k
+
+        out["test_by_key"] = test_by_key
+
+    return out
+
+
+
+def _rmse_scalar(y_true: jnp.ndarray, y_pred: jnp.ndarray) -> float:
+    y_true = jnp.ravel(y_true)
+    y_pred = jnp.ravel(y_pred)
+    return float(jnp.sqrt(jnp.mean((y_pred - y_true) ** 2)))
+
+
+def _rmse_tensor(P_true: jnp.ndarray, P_pred: jnp.ndarray) -> float:
+    # P_*: (N,3,3)
+    return float(jnp.sqrt(jnp.mean((P_pred - P_true) ** 2)))
+
+
+def _component_bias(P_true: jnp.ndarray, P_pred: jnp.ndarray) -> jnp.ndarray:
+    # returns (3,3): mean(pred - true) over samples
+    return jnp.mean(P_pred - P_true, axis=0)
+
+
+def _component_rmse(P_true: jnp.ndarray, P_pred: jnp.ndarray) -> jnp.ndarray:
+    # returns (3,3): rmse per component over samples
+    return jnp.sqrt(jnp.mean((P_pred - P_true) ** 2, axis=0))
+
+
+def _reduce_over_inits(mats: list[jnp.ndarray], reduce: str) -> jnp.ndarray:
+    """
+    mats: list of (3,3) arrays (or scalar arrays); reduce across list dimension.
+    """
+    X = jnp.stack(mats, axis=0)
+    if reduce == "median":
+        return jnp.median(X, axis=0)
+    if reduce == "mean":
+        return jnp.mean(X, axis=0)
+    raise ValueError("reduce must be one of {'median','mean'}")
+
+
+def collect_component_matrix_task5_2_wicub(
+    runs_wicub: list,
+    *,
+    dataset_3: dict,
+    G_cub: jnp.ndarray,   # kept for signature consistency; not used here
+    metric: str = "bias",         # "bias" | "rmse"
+    reduce: str = "median",       # "median" | "mean"
+    steps_list=(100_000, 300_000),
+    arch_order=("small", "medium"),
+    batch_size: int = 256,        # performance
+    max_samples: int | None = None,  # performance (optional)
+):
+    """
+    Returns:
+      M[(arch, steps)] -> (3,3) matrix
+      vmax -> robust 95th percentile scale
+    """
+    metric = metric.lower().strip()
+    reduce = reduce.lower().strip()
+
+    sets = get_task5_2_train_test_sets(dataset_3, G_cub=G_cub, include_test_by_key=False)
+    (F_te, I_te), (_W_te, P_te) = sets["test"]
+
+    # optional subsample (helps a lot on WICUB)
+    if max_samples is not None and F_te.shape[0] > max_samples:
+        key = jrandom.PRNGKey(0)
+        idx = jrandom.choice(key, F_te.shape[0], shape=(max_samples,), replace=False)
+        F_te = F_te[idx]
+        I_te = I_te[idx]
+        P_te = P_te[idx]
+
+    # Parse arch and steps robustly from your known tag format
+    def _parse_arch_steps(tag: str):
+        m = re.search(r"_((?:small|medium|large))_l\d+_n\d+_steps(\d+)", tag.lower())
+        if not m:
+            return None, None
+        return m.group(1), int(m.group(2))
+
+    buckets = {(a, int(s)): [] for a in arch_order for s in steps_list}
+    for r in runs_wicub:
+        arch, steps = _parse_arch_steps(r.tag)
+        if arch in arch_order and steps in steps_list:
+            buckets[(arch, steps)].append(r)
+
+    M = {}
+    all_vals = []
+
+    for steps in steps_list:
+        for arch in arch_order:
+            rs = buckets[(arch, int(steps))]
+            if not rs:
+                M[(arch, int(steps))] = jnp.zeros((3, 3))
+                continue
+
+            per_init = []
+            for rr in rs:
+                # batched prediction (WICUB is expensive)
+                _, Pp = predict_wicub_wp_batched(rr.model, F_te, I_te, batch_size=batch_size)
+
+                if metric == "bias":
+                    per_init.append(_component_bias(P_te, Pp))
+                elif metric == "rmse":
+                    per_init.append(_component_rmse(P_te, Pp))
+                else:
+                    raise ValueError("metric must be 'bias' or 'rmse'")
+
+            M[(arch, int(steps))] = _reduce_over_inits(per_init, reduce=reduce)
+
+            if metric == "bias":
+                all_vals.append(jnp.abs(M[(arch, int(steps))]).reshape(-1))
+            else:
+                all_vals.append(M[(arch, int(steps))].reshape(-1))
+
+    all_vals = jnp.concatenate(all_vals, axis=0) if all_vals else jnp.array([1.0])
+    vmax = float(jnp.percentile(all_vals, 95))
+    if not np.isfinite(vmax) or vmax <= 0:
+        vmax = 1.0
+
+    return M, vmax
+
+
+
+# ---------------------------------------------------------------------
+# Task 5.2 — 3-panel RMSE vs steps (train / test-all / test-per-path aggregate)
+# ---------------------------------------------------------------------
+
+def plot_task5_2_train_test_rmse_vs_steps(
+    *,
+    art_dir: str,
+    dataset_3: dict,
+    G_cub: jnp.ndarray,
+    metric: str = "P",                 # "P" stress or "W" energy
+    agg: str = "median",               # over inits
+    steps_list=(100_000, 300_000),
+    arch_order=("small", "medium"),
+    title: str | None = None,
+):
+    """
+    3 aligned panels:
+      1) Train RMSE (calibration set)
+      2) Test RMSE on concatenated test set (all test keys)
+      3) Test RMSE aggregated per test-path (median over test_keys)
+
+    Both y-axes are log.
+    """
+
+    runs = ewf.load_runs(art_dir, model_id="WICUB", dataset_3=dataset_3, strict=False, G_cub=G_cub)
+    if not runs:
+        raise FileNotFoundError(f"No WICUB runs found in {art_dir}")
+
+    sets = get_task5_2_train_test_sets(dataset_3, G_cub=G_cub, include_test_by_key=True)
+    (F_tr, I_tr), (W_tr, P_tr) = sets["train"]
+    (F_te, I_te), (W_te, P_te) = sets["test"]
+    test_by_key = sets["test_by_key"]
+
+    def _parse_arch_steps(tag: str):
+        m = re.search(r"_([a-zA-Z]+)_l\d+_n\d+_steps(\d+)", tag)
+        if not m:
+            return None, None
+        return m.group(1).lower(), int(m.group(2))
+
+    buckets = {(a, s): [] for a in arch_order for s in steps_list}
+    for r in runs:
+        arch, steps = _parse_arch_steps(r.tag)
+        if arch in arch_order and steps in steps_list:
+            buckets[(arch, steps)].append(r)
+
+    def _rmse_for_one_model(rr, which: str):
+        if which == "train":
+            Wp, Pp = jax.vmap(rr.model)((F_tr, I_tr))
+            return _rmse_tensor(P_tr, Pp) if metric == "P" else _rmse_scalar(W_tr, jnp.squeeze(Wp))
+        if which == "test":
+            Wp, Pp = jax.vmap(rr.model)((F_te, I_te))
+            return _rmse_tensor(P_te, Pp) if metric == "P" else _rmse_scalar(W_te, jnp.squeeze(Wp))
+        if which == "test_by_key_median":
+            per_key = []
+            for k, ((Fk, Ik), (Wk, Pk)) in test_by_key.items():
+                Wp, Pp = jax.vmap(rr.model)((Fk, Ik))
+                per_key.append(_rmse_tensor(Pk, Pp) if metric == "P" else _rmse_scalar(Wk, jnp.squeeze(Wp)))
+            return float(np.median(per_key)) if per_key else float("nan")
+        raise ValueError("unknown which")
+
+    def _agg(vals):
+        vals = np.asarray(vals, dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return np.nan
+        return float(np.median(vals)) if agg == "median" else float(np.mean(vals))
+
+    xs = [int(s // 1000) for s in steps_list]  # k steps for ticks
+
+    series = {a: {"train": [], "test": [], "test_by_key_median": []} for a in arch_order}
+    for a in arch_order:
+        for s in steps_list:
+            rs = buckets[(a, s)]
+            train_vals = [_rmse_for_one_model(rr, "train") for rr in rs]
+            test_vals  = [_rmse_for_one_model(rr, "test") for rr in rs]
+            key_vals   = [_rmse_for_one_model(rr, "test_by_key_median") for rr in rs]
+
+            series[a]["train"].append(_agg(train_vals))
+            series[a]["test"].append(_agg(test_vals))
+            series[a]["test_by_key_median"].append(_agg(key_vals))
+
+    fig, axes = plt.subplots(3, 1, figsize=(8, 8), sharex=True)
+
+    if title is None:
+        title = f"Task 5.2 — {metric}-RMSE vs training steps ({agg} over inits)"
+    fig.suptitle(title)
+
+    panels = [
+        ("train", "Training RMSE (calibration)"),
+        ("test", "Test RMSE (all test keys)"),
+        ("test_by_key_median", "Test RMSE (median over test paths)"),
+    ]
+
+    for ax, (key, ylabel) in zip(axes, panels):
+        for a in arch_order:
+            ax.plot(xs, series[a][key], marker="o", label=a)
+        ax.set_yscale("log")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, which="both", linestyle="--", alpha=0.4)
+
+    axes[0].legend(title="Architecture", loc="upper right")
+    axes[-1].set_xlabel("Training steps [k]")
+
+    plt.tight_layout()
+    plt.show()
+
+def predict_wicub_energy_fast(model, I: jnp.ndarray) -> jnp.ndarray:
+    """
+    Fast W prediction that avoids model.__call__ (and thus avoids jacobian/grad).
+    I: (N,6) -> returns (N,)
+    """
+    W = jax.vmap(model.nn)(I)
+    return jnp.squeeze(W)
+
+def predict_wicub_wp_batched(model, F: jnp.ndarray, I: jnp.ndarray, *, batch_size: int = 256):
+    """
+    Batched W,P prediction via model.__call__ (expensive; includes jacobians).
+    Returns:
+      W: (N,), P: (N,3,3)
+    """
+    N = F.shape[0]
+    Ws = []
+    Ps = []
+    for i0 in range(0, N, batch_size):
+        i1 = min(i0 + batch_size, N)
+        Wb, Pb = jax.vmap(model)((F[i0:i1], I[i0:i1]))
+        Ws.append(jnp.squeeze(Wb))
+        Ps.append(Pb)
+    return jnp.concatenate(Ws, axis=0), jnp.concatenate(Ps, axis=0)

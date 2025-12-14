@@ -222,6 +222,7 @@ def load_runs(
     model_id: str | None = None,
     tag_contains: str | None = None,
     dataset_1: dict | None = None,
+    dataset_3: dict | None = None,
     G_cub: jnp.ndarray | None = None,
     like_key: jrandom.PRNGKey = jrandom.PRNGKey(0),
     strict: bool = False,
