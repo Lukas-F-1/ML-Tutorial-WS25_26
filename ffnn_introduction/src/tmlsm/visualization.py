@@ -1378,7 +1378,44 @@ def plt_growth_cond(
 
     # broken y limits
     if broken_y:
-        ax_bot.set_ylim(bottom=None, top=y_low_max)
+        # ---- choose a robust lower y-limit for the bottom panel (log-safe) ----
+        y_min = np.inf
+
+        # include model curves (means) and (optionally) per-init curves
+        for _lbl, d in normed.items():
+            Wm = d.get("W_mean", None)
+            if Wm is not None:
+                Wm = np.asarray(Wm, dtype=float)
+                m = np.isfinite(Wm) & (Wm > 0)
+                if np.any(m):
+                    y_min = min(y_min, float(np.min(Wm[m])))
+
+            Wi = d.get("W_per_init", None)
+            if show_inits and (Wi is not None):
+                Wi = np.asarray(Wi, dtype=float)
+                m = np.isfinite(Wi) & (Wi > 0)
+                if np.any(m):
+                    y_min = min(y_min, float(np.min(Wi[m])))
+
+        # include calibration overlay if present (so points aren't clipped)
+        if overlay_calibration and (max_cal_x is not None):
+            # x_cal, W_cal exist in the calibration overlay block scope; if you keep them there,
+            # you can alternatively store min_cal_y in a variable and use it here.
+            try:
+                m = np.isfinite(W_cal) & (W_cal > 0)
+                if np.any(m):
+                    y_min = min(y_min, float(np.min(W_cal[m])))
+            except NameError:
+                pass
+
+        # fallback if something went wrong
+        if not np.isfinite(y_min):
+            y_min = 1e-12
+
+        # pad downward so minima / identity markers are comfortably visible
+        y_min = 0
+        ax_bot.set_ylim(bottom=y_min, top=y_low_max)
+
         # determine a sensible upper y max
         # use maximum W among all models in the upper region, else y_high_min*y_high_pad
         y_max = y_high_min * y_high_pad
@@ -1423,7 +1460,7 @@ def plt_growth_cond(
         ax_top.set_ylabel(r"$W(F)$")
 
     fig.suptitle("Growth Condition Evaluation (comparison)")
-    ax_bot.legend(loc="lower left")
+    ax_bot.legend(loc="lower right")
     fig.tight_layout()
     plt.show()
 

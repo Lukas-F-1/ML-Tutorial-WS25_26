@@ -1,0 +1,23 @@
+{
+  "task": "2.2",
+  "model_id": "MS",
+  "tag": "MS_large_l4_n32_steps300000_init20",
+  "arch_name": "large",
+  "num_hidden_layers": 4,
+  "nodes_per_layer": 32,
+  "activation": "softplus",
+  "steps": 300000,
+  "init_idx": 20,
+  "n_inits": 20,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "train_dataset": "Dataset 1 calibration (uni + pure_shear + biax)",
+  "test_sets": [
+    "biax_test",
+    "mixed_test"
+  ],
+  "rmse_biax_test": 2.339385509490967,
+  "rmse_mixed_test": 10.677305221557617,
+  "saved_model_path": "artifacts\\task2_2\\MS_large_l4_n32_steps300000_init20.eqx",
+  "saved_history_path": "artifacts\\task2_2\\MS_large_l4_n32_steps300000_init20_history.pkl"
+}
