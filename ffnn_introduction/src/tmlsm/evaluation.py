@@ -177,8 +177,6 @@ def evaluate_growth_condition(
     return result
 
 
-
-
 def evaluate_normalization_condition(model, model_type: str):
     """
     Evaluate P(I) for a given trained model (normalization condition).
@@ -802,8 +800,6 @@ def component_error_distribution_grid(
     plt.show()
 
 
-
-
 def component_rmse_barplot(
     P_true,
     P_pred_dict: dict,
@@ -979,14 +975,11 @@ class RMSEReport:
     errors_P: np.ndarray | None          # (K, N, 3, 3) or None
     errors_W: np.ndarray | None          # (K, N) or None
 
-
 def _rmse_scalar(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(x))))
 
-
 def _as_np(x) -> np.ndarray:
     return np.array(x)
-
 
 def _parse_test_set_any(ts: Any, test_key: str):
     """
@@ -1031,7 +1024,6 @@ def _parse_test_set_any(ts: Any, test_key: str):
 
     raise ValueError(f"Unrecognized test-set structure for key='{test_key}': {type(item)} / {item}")
 
-
 def _get_test_mode_keys(test_mode: str) -> list[str]:
     """
     test_mode:
@@ -1047,7 +1039,6 @@ def _get_test_mode_keys(test_mode: str) -> list[str]:
     if tm == "full":
         return ["biax_test", "mixed_test"]
     raise ValueError("test_mode must be one of {'biax','mixed','full'}")
-
 
 def _concat_tests(parsed_list):
     """
@@ -1080,7 +1071,6 @@ def _concat_tests(parsed_list):
     P_true = jnp.concatenate(Ps, axis=0)
 
     return inputs, W_true, P_true
-
 
 def _predict_WP(model: Any, inputs: tuple[Any, ...]):
     """
@@ -1115,7 +1105,6 @@ def _predict_WP(model: Any, inputs: tuple[Any, ...]):
         return jnp.squeeze(W), P
 
     raise ValueError(f"Unsupported inputs tuple length: {len(inputs)}")
-
 
 def compute_rmse_over_test_set(
     runs: Iterable[Any],
@@ -1265,8 +1254,6 @@ def select_best_per_size(
 
     return winners
 
-import matplotlib.pyplot as plt
-
 def plot_best_sizes_mean_median(
     winners: dict,
     *,
@@ -1323,7 +1310,6 @@ def plot_best_sizes_mean_median(
     ax.legend()
     fig.tight_layout()
     plt.show()
-
 
 def _steps_to_k(steps: int) -> str:
     if steps >= 1_000_000:
@@ -1850,7 +1836,6 @@ def plot_task3_section2_train_test_rmse_vs_steps(
     fig.tight_layout()
     plt.show()
 
-
 def get_train_witi_from_dataset_1(dataset_1: dict):
     """
     Reconstruct the exact calibration/training set used by Task 3 WITI workflows.
@@ -2071,9 +2056,6 @@ def plot_task2_2_train_test_rmse_vs_steps(
     fig.tight_layout()
     plt.show()
 
-import numpy as np
-import matplotlib.pyplot as plt
-
 def plot_P_component_mirrored_density_grid(
     P_true: np.ndarray,
     P_pred_list,
@@ -2205,6 +2187,73 @@ def plot_P_component_mirrored_density_grid(
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     plt.show()
 
+def evaluate_task3_calibration_study(
+    artifacts_dir: str | Path,
+    dataset_1: dict,
+    *,
+    test_mode: str = "mixed",  # "biax", "mixed", "full"
+    model_id: str = "WITI",
+) -> dict[str, np.ndarray]:
+    """
+    Evaluate all Task 3 calibration study models and return component-wise RMSE
+    for each training subset.
+    
+    Args:
+        artifacts_dir: Path to task3_calibration_study artifacts folder
+        dataset_1: Prepared dataset from workflows.prepare_dataset_1()
+        test_mode: Which test set to use ("biax", "mixed", "full")
+        model_id: Model type to evaluate (default "WITI")
+        
+    Returns:
+        Dict mapping subset_tag -> (9,) array of component RMSE values
+        e.g. {"biaxial": [0.01, 0.02, ...], "biaxial+uniaxial": [...], ...}
+    
+    Example:
+        >>> component_errors = evaluate_task3_calibration_study(
+        ...     "artifacts/task3_calibration_study",
+        ...     dataset_1,
+        ...     test_mode="mixed"
+        ... )
+        >>> # Then plot with visualization.plot_task3_component_heatmap(component_errors)
+    """
+    from pathlib import Path
+    
+    artifacts_dir = Path(artifacts_dir)
+    
+    # Load all runs
+    runs = ewf.load_runs(
+        artifacts_dir,
+        model_id=model_id,
+        dataset_1=dataset_1,
+        strict=False,
+    )
+    
+    if not runs:
+        raise ValueError(f"No runs found in {artifacts_dir} for model_id={model_id}")
+    
+    # Group runs by subset_tag
+    subset_groups = {}
+    for r in runs:
+        subset_tag = r.meta.get("subset_tag", "unknown")
+        if subset_tag not in subset_groups:
+            subset_groups[subset_tag] = []
+        subset_groups[subset_tag].append(r)
+    
+    # Compute RMSE for each subset
+    component_errors = {}
+    
+    for subset_tag, subset_runs in subset_groups.items():
+        report = compute_rmse_over_test_set(
+            subset_runs,
+            dataset_1=dataset_1,
+            test_mode=test_mode,
+            model_name=subset_tag,
+            return_component_metrics=True,
+        )
+        # rmse_P_comp_mean is (3,3) -> flatten to (9,)
+        component_errors[subset_tag] = report.rmse_P_comp_mean.flatten()
+    
+    return component_errors
 
 def collect_component_matrix_task2_2_ms(
     runs,

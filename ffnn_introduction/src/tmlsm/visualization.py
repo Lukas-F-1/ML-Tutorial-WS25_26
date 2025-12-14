@@ -345,6 +345,143 @@ def plot_F_diagonals(F, time=None, components=["F11", "F22", "F33"], title="Diag
 
     return fig, ax
 
+def plot_task3_component_heatmap(
+    component_errors,
+    *,
+    title="Task 3: Component-wise RMSE by Training Subset",
+    log_scale=True,
+    figsize=(14, 8),
+    cmap="RdYlGn_r",
+    annotate=True,
+    annotation_fmt=".3f",
+    subset_order=None,
+    zero_threshold=1e-6,
+    zero_color="darkgreen",
+):
+    """
+    Heatmap: X-Achse = Training Subsets, Y-Achse = P-Komponenten, Farbe = RMSE.
+    
+    Args:
+        component_errors: Dict {subset_tag: (9,) array} oder {subset_tag: (3,3) array}
+        zero_threshold: Werte unter diesem Threshold werden als "Null" behandelt
+        zero_color: Farbe für Null-Werte (werden separat gefärbt)
+    """
+    from matplotlib.colors import LogNorm, Normalize
+    import matplotlib.patches as mpatches
+    
+    component_labels = ["P₁₁", "P₁₂", "P₁₃", "P₂₁", "P₂₂", "P₂₃", "P₃₁", "P₃₂", "P₃₃"]
+    
+    # Manuelle Sortierung für Task 3
+    if subset_order is None:
+        # Definierte Reihenfolge
+        preferred_order = [
+            "uniaxial",
+            "biaxial", 
+            "pure_shear",
+            "unknown",  # falls vorhanden
+            "uniaxial+biaxial", "biaxial+uniaxial",
+            "uniaxial+pure_shear", "pure_shear+uniaxial",
+            "biaxial+pure_shear", "pure_shear+biaxial",
+            "uniaxial+biaxial+pure_shear", "biaxial+uniaxial+pure_shear",
+            "uniaxial+pure_shear+biaxial", "biaxial+pure_shear+uniaxial",
+            "pure_shear+uniaxial+biaxial", "pure_shear+biaxial+uniaxial",
+        ]
+        
+        # Sortiere nach Position in preferred_order, unbekannte ans Ende
+        def sort_key(tag):
+            # Suche nach passendem Eintrag (auch Teilstrings)
+            tag_lower = tag.lower()
+            for i, pref in enumerate(preferred_order):
+                if pref in tag_lower or tag_lower.startswith(pref.split("+")[0]):
+                    return (i, tag)
+            return (999, tag)  # Unbekannte ans Ende
+        
+        subset_order = sorted(component_errors.keys(), key=sort_key)
+    
+    # Error-Matrix bauen: (9 Komponenten, N Subsets)
+    n_subsets = len(subset_order)
+    error_matrix = np.zeros((9, n_subsets))
+    
+    for j, subset_tag in enumerate(subset_order):
+        err = np.array(component_errors[subset_tag]).flatten()
+        error_matrix[:, j] = err
+    
+    # Maske für Null-Werte erstellen
+    zero_mask = error_matrix < zero_threshold
+    
+    # Min/Max nur von nicht-Null-Werten für die Farbskala
+    non_zero_values = error_matrix[~zero_mask]
+    if len(non_zero_values) > 0:
+        vmin = non_zero_values.min()
+        vmax = non_zero_values.max()
+    else:
+        vmin, vmax = 1e-6, 1.0
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Kopie für Anzeige: Null-Werte auf NaN setzen (werden nicht geplottet)
+    display_matrix = error_matrix.copy()
+    display_matrix[zero_mask] = np.nan
+    
+    if log_scale:
+        norm = LogNorm(vmin=vmin, vmax=vmax)
+    else:
+        norm = Normalize(vmin=vmin, vmax=vmax)
+    
+    # Hauptheatmap (ohne Nullen)
+    im = ax.imshow(display_matrix, aspect='auto', cmap=cmap, norm=norm)
+    
+    # Null-Werte grün einfärben
+    for i in range(9):
+        for j in range(n_subsets):
+            if zero_mask[i, j]:
+                ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1, 
+                                           facecolor=zero_color, edgecolor='white', linewidth=2))
+    
+    # Annotationen
+    if annotate:
+        for i in range(9):
+            for j in range(n_subsets):
+                val = error_matrix[i, j]
+                
+                if zero_mask[i, j]:
+                    # Null-Werte: weißer Text auf grün
+                    ax.text(j, i, "≈0", ha='center', va='center',
+                           fontsize=9, color='white', fontweight='bold')
+                else:
+                    # Normale Werte: Textfarbe basierend auf Hintergrund
+                    if log_scale:
+                        is_middle = (vmin * 3 < val < vmax / 3)
+                    else:
+                        is_middle = (0.25 < (val-vmin)/(vmax-vmin) < 0.75)
+                    text_color = 'black' if is_middle else 'white'
+                    ax.text(j, i, f'{val:{annotation_fmt}}', ha='center', va='center',
+                           fontsize=8, color=text_color, fontweight='bold')
+    
+    ax.set_xticks(range(n_subsets))
+    ax.set_xticklabels(subset_order, rotation=45, ha='right', fontsize=10)
+    ax.set_xlabel("Training Subset", fontsize=12, fontweight='bold')
+    
+    ax.set_yticks(range(9))
+    ax.set_yticklabels(component_labels, fontsize=11)
+    ax.set_ylabel("Stress Component", fontsize=12, fontweight='bold')
+    
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+    
+    # Colorbar
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label(f'RMSE{" (log)" if log_scale else ""}', fontsize=11)
+    
+    # Grid
+    ax.set_xticks(np.arange(-0.5, n_subsets, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, 9, 1), minor=True)
+    ax.grid(which='minor', color='white', linewidth=2)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
 def plot_generalization_heatmap(results_df, title="Model Generalization: Test Error Heatmap"):
     """
     Plots a vertically split heatmap comparing two models across different
@@ -1463,11 +1600,6 @@ def plt_growth_cond(
     ax_bot.legend(loc="lower right")
     fig.tight_layout()
     plt.show()
-
-
-
-
-
 
 def plot_stretch_distribution_components(F_data, title="Principal Stretch Distribution"):
     """
