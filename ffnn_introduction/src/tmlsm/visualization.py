@@ -370,6 +370,31 @@ def plot_task3_component_heatmap(
     import matplotlib.patches as mpatches
     
     component_labels = ["P₁₁", "P₁₂", "P₁₃", "P₂₁", "P₂₂", "P₂₃", "P₃₁", "P₃₂", "P₃₃"]
+    # Pretty names for training subsets (Task 3 – fixed vocabulary)
+    subset_label_map = {
+        "uniaxial": "Uniaxial",
+        "biaxial": "Biaxial",
+        "pure_shear": "Pure Shear",
+
+        "uniaxial+biaxial": "Uniaxial + Biaxial",
+        "biaxial+uniaxial": "Biaxial + Uniaxial",
+
+        "uniaxial+pure_shear": "Uniaxial + Pure Shear",
+        "pure_shear+uniaxial": "Pure Shear + Uniaxial",
+
+        "biaxial+pure_shear": "Biaxial + Pure Shear",
+        "pure_shear+biaxial": "Pure Shear + Biaxial",
+
+        "uniaxial+biaxial+pure_shear": "Uniaxial +\nBiaxial + Pure Shear",
+        "biaxial+uniaxial+pure_shear": "Biaxial +\nUniaxial + Pure Shear",
+        "uniaxial+pure_shear+biaxial": "Uniaxial + Pure Shear +\nBiaxial",
+        "biaxial+pure_shear+uniaxial": "Biaxial + Pure Shear +\nUniaxial",
+        "pure_shear+uniaxial+biaxial": "Pure Shear + Uniaxial +\nBiaxial",
+        "pure_shear+biaxial+uniaxial": "Pure Shear + Biaxial +\nUniaxial",
+
+        "unknown": "Unknown",
+    }
+
     
     # Manuelle Sortierung für Task 3
     if subset_order is None:
@@ -459,14 +484,16 @@ def plot_task3_component_heatmap(
                            fontsize=8, color=text_color, fontweight='bold')
     
     ax.set_xticks(range(n_subsets))
-    ax.set_xticklabels(subset_order, rotation=45, ha='right', fontsize=10)
-    ax.set_xlabel("Training Subset", fontsize=12, fontweight='bold')
+    pretty_labels = [subset_label_map.get(s, s.replace("_", " ").title()) for s in subset_order]
+    ax.set_xticklabels(pretty_labels, rotation=45, ha='right', fontsize=12)
+
+    ax.set_xlabel("Training Subset", fontsize=12)
     
     ax.set_yticks(range(9))
-    ax.set_yticklabels(component_labels, fontsize=11)
-    ax.set_ylabel("Stress Component", fontsize=12, fontweight='bold')
+    ax.set_yticklabels(component_labels, fontsize=12)
+    ax.set_ylabel("Stress Component", fontsize=12)
     
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+    ax.set_title(title, fontsize=14, pad=15)
     
     # Colorbar
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
@@ -1191,6 +1218,7 @@ def plt_growth_cond(
     alpha_inits: float = 0.25,
     marker_mean: bool = False,
     mark_identity: bool = True,
+    ds: str = "1",
 
     # --- calibration overlay ---
     overlay_calibration: bool = False,
@@ -1312,6 +1340,39 @@ def plt_growth_cond(
         return dict(x=x, x_label=x_label, W_mean=W_mean, W_std=W_std, W_per_init=W_per_init, id_pos=id_pos)
 
     # ----------------------------
+    # Pretty labels for legend (WITI_A/B/C -> W^I_A etc.)
+    # ----------------------------
+    # ----------------------------
+    # Pretty labels for legend
+    # ----------------------------
+    label_map = {
+        # Dataset 1 (strategies)
+        "WITI_A": r"$W^{I}_{A}$",
+        "WITI_B": r"$W^{I}_{B}$",
+        "WITI_C": r"$W^{I}_{C}$",
+
+        # Dataset 3 / Task 5 models
+        "WICUB":  r"$W^{I}_{\mathrm{cub}}$",
+        "WF":     r"$W^{F}$",
+        "WF_AUG": r"$W^{F}_{\mathrm{aug}}$",
+    }
+
+    def _pretty_label(lbl: str) -> str:
+        # exact match first
+        if lbl in label_map:
+            return label_map[lbl]
+
+        # prefix match for keys like "WICUB_medium_300k", "WF_AUG_obs64", "WF_medium_300k", etc.
+        for prefix, pretty in (("WF_AUG", label_map["WF_AUG"]),
+                            ("WICUB", label_map["WICUB"]),
+                            ("WF", label_map["WF"])):
+            if str(lbl).startswith(prefix):
+                return pretty
+
+        return lbl
+
+
+    # ----------------------------
     # Detect multi-model input
     # ----------------------------
     is_multi = isinstance(results, dict) and ("F_all" not in results)
@@ -1327,8 +1388,6 @@ def plt_growth_cond(
     # ----------------------------
     auto_x_upper = None
     if use_auto_x_for_upper and (x_axis.lower() == "detf") and show_mean:
-        # Find the smallest x where *all* models have W_mean >= y_high_min.
-        # We do this by scanning each model’s mean curve and taking the max of the individual thresholds.
         thresholds = []
         for label, d in normed.items():
             x = d["x"]
@@ -1337,7 +1396,6 @@ def plt_growth_cond(
                 continue
             idx = np.where(W >= y_high_min)[0]
             if len(idx) == 0:
-                # model never reaches y_high_min; skip from thresholding
                 continue
             thresholds.append(float(x[idx[0]]))
         if thresholds:
@@ -1367,7 +1425,6 @@ def plt_growth_cond(
         if calibration_provider is None:
             raise ValueError("overlay_calibration=True requires calibration_provider callable.")
 
-        # Use the first model’s calibration data (assumes same dataset across models).
         first_label = next(iter(results.keys()))
         cal = calibration_provider(first_label, results[first_label])
         if cal is not None:
@@ -1389,7 +1446,6 @@ def plt_growth_cond(
                 max_cal_x = float(np.max(x_cal))
 
                 if calibration_mode == "hexbin":
-                    # density background, subtle
                     for ax in axes:
                         ax.hexbin(
                             x_cal, W_cal,
@@ -1401,7 +1457,6 @@ def plt_growth_cond(
                             zorder=0,
                             rasterized=True,
                         )
-                    # legend proxy (big and visible)
                     proxy = plt.Line2D(
                         [0], [0],
                         marker="s",
@@ -1436,7 +1491,7 @@ def plt_growth_cond(
                         markerfacecolor=calibration_color,
                         markeredgecolor="none",
                         alpha=0.6,
-                        label="Calibration points (subsample)",
+                        label="Calibration points",
                     )
                     ax_bot.add_line(proxy)
                 else:
@@ -1445,8 +1500,8 @@ def plt_growth_cond(
     # ----------------------------
     # Plot models on axes
     # ----------------------------
-    line_handles = {}
-    id_positions = {}  # label -> (x_id, y_id)
+    line_handles = {}     # original_label -> line handle (for colors)
+    id_positions = {}     # original_label -> (x_id, y_id)
 
     for label, d in normed.items():
         x = d["x"]
@@ -1455,53 +1510,51 @@ def plt_growth_cond(
         W_per_init = d["W_per_init"]
         id_pos = d["id_pos"]
 
-        # optionally restrict upper panel to x>=x_upper_min_eff (to avoid drawing tiny part twice)
+        pretty = _pretty_label(label)
+
         def _mask_for_upper(xarr):
             if x_upper_min_eff is None:
                 return np.ones_like(xarr, dtype=bool)
             return xarr >= x_upper_min_eff
 
-        # per-init curves
         if show_inits and (W_per_init is not None):
             K = W_per_init.shape[0]
             for k in range(K):
                 for ax in axes:
                     ax.plot(x, W_per_init[k], linewidth=1.0, alpha=alpha_inits, zorder=2)
 
-        # mean/std
         if show_mean and (W_mean is not None):
             fmt = "o-" if marker_mean else "-"
 
             if broken_y:
-                # draw on both panels; upper panel can be masked to show only high-x part if you want
-                (line_bot,) = ax_bot.plot(x, W_mean, fmt, linewidth=2.0, markersize=3, label=label, zorder=3)
+                (line_bot,) = ax_bot.plot(x, W_mean, fmt, linewidth=2.0, markersize=3, label=pretty, zorder=3)
                 line_handles[label] = line_bot
 
                 m_up = _mask_for_upper(x)
-                (line_top,) = ax_top.plot(x[m_up], W_mean[m_up], fmt, linewidth=2.0, markersize=3, label=None, zorder=3)
+                ax_top.plot(x[m_up], W_mean[m_up], fmt, linewidth=2.0, markersize=3, label=None, zorder=3)
 
                 if show_std_band and (W_std is not None):
                     ax_bot.fill_between(x, W_mean - W_std, W_mean + W_std, alpha=0.15, zorder=2)
                     ax_top.fill_between(x[m_up], (W_mean - W_std)[m_up], (W_mean + W_std)[m_up], alpha=0.15, zorder=2)
             else:
-                (line_bot,) = ax_bot.plot(x, W_mean, fmt, linewidth=2.0, markersize=3, label=label, zorder=3)
+                (line_bot,) = ax_bot.plot(x, W_mean, fmt, linewidth=2.0, markersize=3, label=pretty, zorder=3)
                 line_handles[label] = line_bot
                 if show_std_band and (W_std is not None):
                     ax_bot.fill_between(x, W_mean - W_std, W_mean + W_std, alpha=0.15, zorder=2)
 
-            # identity marker reference (stored, colored later)
             if mark_identity and (id_pos is not None):
                 id_positions[label] = (float(x[id_pos]), float(W_mean[id_pos]))
 
-    # identity diamonds, colored like their curve
+    # identity diamonds, colored like their curve + legend entry on bottom
     if mark_identity:
         for label, (x_id, y_id) in id_positions.items():
             col = line_handles[label].get_color() if label in line_handles else None
+            pretty = _pretty_label(label)
+
             for ax in axes:
-                # plot only if within this axis y-range later; safe to plot anyway
                 ax.scatter([x_id], [y_id], marker="D", s=65, zorder=5, color=col, label=None)
-            # add legend entry once (on bottom)
-            ax_bot.scatter([x_id], [y_id], marker="D", s=65, zorder=5, color=col, label=rf"{label} @ $F=I$")
+
+            ax_bot.scatter([x_id], [y_id], marker="D", s=65, zorder=5, color=col, label=rf"{pretty} @ $F=I$")
 
     # ----------------------------
     # Axis scales and limits
@@ -1513,12 +1566,9 @@ def plt_growth_cond(
             ax.set_yscale("log")
         ax.grid(True, linestyle="--", alpha=0.6)
 
-    # broken y limits
     if broken_y:
-        # ---- choose a robust lower y-limit for the bottom panel (log-safe) ----
         y_min = np.inf
 
-        # include model curves (means) and (optionally) per-init curves
         for _lbl, d in normed.items():
             Wm = d.get("W_mean", None)
             if Wm is not None:
@@ -1534,10 +1584,7 @@ def plt_growth_cond(
                 if np.any(m):
                     y_min = min(y_min, float(np.min(Wi[m])))
 
-        # include calibration overlay if present (so points aren't clipped)
         if overlay_calibration and (max_cal_x is not None):
-            # x_cal, W_cal exist in the calibration overlay block scope; if you keep them there,
-            # you can alternatively store min_cal_y in a variable and use it here.
             try:
                 m = np.isfinite(W_cal) & (W_cal > 0)
                 if np.any(m):
@@ -1545,38 +1592,34 @@ def plt_growth_cond(
             except NameError:
                 pass
 
-        # fallback if something went wrong
         if not np.isfinite(y_min):
             y_min = 1e-12
 
-        # pad downward so minima / identity markers are comfortably visible
+        # NOTE: your current code forces y_min=0; keeping behavior as-is
         y_min = 0
         ax_bot.set_ylim(bottom=y_min, top=y_low_max)
 
-        # determine a sensible upper y max
-        # use maximum W among all models in the upper region, else y_high_min*y_high_pad
         y_max = y_high_min * y_high_pad
-        for label, d in normed.items():
+        for _lbl, d in normed.items():
             W = d["W_mean"]
             if W is None:
                 continue
             y_max = max(y_max, float(np.nanmax(W)) * 1.05)
         ax_top.set_ylim(bottom=y_high_min, top=y_max)
 
-        # add break marks
         ax_top.spines["bottom"].set_visible(False)
         ax_bot.spines["top"].set_visible(False)
-        ax_top.tick_params(labeltop=False)  # no top x labels
+        ax_top.tick_params(labeltop=False)
         ax_bot.xaxis.tick_bottom()
 
-        d = 0.008
+        dbr = 0.008
         kwargs = dict(transform=ax_top.transAxes, color="k", clip_on=False, linewidth=1.0)
-        ax_top.plot((-d, +d), (-d, +d), **kwargs)
-        ax_top.plot((1 - d, 1 + d), (-d, +d), **kwargs)
+        ax_top.plot((-dbr, +dbr), (-dbr, +dbr), **kwargs)
+        ax_top.plot((1 - dbr, 1 + dbr), (-dbr, +dbr), **kwargs)
 
         kwargs = dict(transform=ax_bot.transAxes, color="k", clip_on=False, linewidth=1.0)
-        ax_bot.plot((-d, +d), (1 - d, 1 + d), **kwargs)
-        ax_bot.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)
+        ax_bot.plot((-dbr, +dbr), (1 - dbr, 1 + dbr), **kwargs)
+        ax_bot.plot((1 - dbr, 1 + dbr), (1 - dbr, 1 + dbr), **kwargs)
 
     # x-range extension to calibration max
     if extend_det_to_calibration_max and overlay_calibration and (max_cal_x is not None):
@@ -1585,21 +1628,29 @@ def plt_growth_cond(
         if broken_y:
             ax_top.set_xlim(xmin, max(xmax, max_cal_x))
 
-    # If we computed an upper x-min threshold, annotate it (optional)
-    # if x_upper_min_eff is not None and broken_y:
-    #     ax_bot.axvline(x_upper_min_eff, color="0.5", linestyle=":", linewidth=1.0, alpha=0.6)
-    #     ax_bot.text(x_upper_min_eff, y_low_max, r"$x_{\mathrm{upper}}$", fontsize=9, ha="left", va="top")
-
-    # labels / title / legend
+    # ----------------------------
+    # Labels / title / legend
+    # ----------------------------
     ax_bot.set_xlabel(common_x_label)
-    ax_bot.set_ylabel(r"$W(F)$ (Predicted Energy)")
-    if broken_y:
-        ax_top.set_ylabel(r"$W(F)$")
 
-    fig.suptitle("Growth Condition Evaluation (comparison)")
+    # Remove per-axes ylabels and place one centered label for both panels
+    ax_bot.set_ylabel("")
+    if broken_y:
+        ax_top.set_ylabel("")
+
+    fig.text(0.02, 0.5, r"$W(F)$ (Predicted Energy)", va="center", rotation="vertical")
+
+    if ds == "1":
+        fig.suptitle("Dataset 1 - Growth Condition Evaluation (Median over Inits)")
+    else:
+        fig.suptitle("Dataset 3 - Growth Condition Evaluation (Median over Inits)")
+
     ax_bot.legend(loc="lower right")
-    fig.tight_layout()
+
+    # Tight layout with room for suptitle (top) and the figure-level y-label (left)
+    fig.tight_layout(rect=[0.05, 0.0, 1.0, 0.94])
     plt.show()
+
 
 def plot_stretch_distribution_components(F_data, title="Principal Stretch Distribution"):
     """

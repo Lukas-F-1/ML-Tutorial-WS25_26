@@ -1030,6 +1030,7 @@ def _get_test_mode_keys(test_mode: str) -> list[str]:
       - "biax"
       - "mixed"
       - "full" (biax + mixed, concatenated consistently)
+      - "test" (single test set key; used for Dataset 3 / Task 5 pipelines)
     """
     tm = test_mode.lower()
     if tm == "biax":
@@ -1038,7 +1039,11 @@ def _get_test_mode_keys(test_mode: str) -> list[str]:
         return ["mixed_test"]
     if tm == "full":
         return ["biax_test", "mixed_test"]
-    raise ValueError("test_mode must be one of {'biax','mixed','full'}")
+    if tm == "test":
+        return ["test"]
+    raise ValueError("test_mode must be one of {'biax','mixed','full','test'}")
+
+
 
 def _concat_tests(parsed_list):
     """
@@ -3202,7 +3207,7 @@ def plot_ms_msw_witi_stress_rmse_train_biax_mixed_vs_steps(
     art_dir_t23: str,
     art_dir_t3s2: str,
     steps_list=(100_000, 300_000, 500_000, 700_000, 900_000),
-    agg="median",
+    agg="Median",
     figsize=(10, 8),
 ):
     # ----- load runs -----
@@ -3246,6 +3251,7 @@ def plot_ms_msw_witi_stress_rmse_train_biax_mixed_vs_steps(
     buckets = {(cls, sz, st): [] for cls in classes for sz in size_order for st in steps_list}
     for cls, (rrs, parse_fn) in classes.items():
         for r in rrs:
+            # IMPORTANT: parse expects a string tag
             sz, st = parse_fn(r.tag)
             if sz in size_order and st in steps_list:
                 buckets[(cls, sz, st)].append(r)
@@ -3303,15 +3309,28 @@ def plot_ms_msw_witi_stress_rmse_train_biax_mixed_vs_steps(
     class_colors = {"MS": color_cycle[0], "MSW": color_cycle[1], "WITI": color_cycle[2]}
     size_linestyles = {"small": ":", "medium": "-", "large": "--"}
 
+    # Legend label mapping to mathtext / LaTeX-like formatting
+    def _legend_label(cls: str, sz: str) -> str:
+        if cls == "MS":
+            return rf"$M^{{S}}$ {sz}"
+        if cls == "MSW":
+            return rf"$M^{{S}}_{{w}}$ {sz}"
+        if cls == "WITI":
+            return rf"$W^{{I}}$ {sz}"
+        return f"{cls}-{sz}"
+
     xs = [int(s // 1000) for s in steps_list]
 
     fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
-    fig.suptitle(f"Stress RMSE vs training steps ({agg} over inits) — MS vs MSW vs WITI")
 
+    # Title change: remove model names, start with requested prefix
+    fig.suptitle(f"Dataset 1 - Stress RMSE vs Training Steps ({agg} over Inits)")
+
+    # Y label change: remove "(calibration)" from training panel label
     panels = [
-        ("train", "Training RMSE (calibration)"),
-        ("biax",  "Test RMSE (biax)"),
-        ("mixed", "Test RMSE (mixed)"),
+        ("train", "Training RMSE"),
+        ("biax",  "Test RMSE (Biax)"),
+        ("mixed", "Test RMSE (Mixed)"),
     ]
 
     # global y-limits across ALL panels
@@ -3339,7 +3358,7 @@ def plot_ms_msw_witi_stress_rmse_train_biax_mixed_vs_steps(
                     linestyle=size_linestyles[sz],
                     color=class_colors[cls],
                     linewidth=2,
-                    label=f"{cls}-{sz}",
+                    label=_legend_label(cls, sz),   # updated legend labels
                 )
 
         ax.set_yscale("log")
@@ -3347,15 +3366,26 @@ def plot_ms_msw_witi_stress_rmse_train_biax_mixed_vs_steps(
         ax.set_ylabel(ylabel)
         ax.grid(True, which="both", linestyle="--", alpha=0.35)
 
-    axes[-1].set_xlabel("Training steps [k]")
+    axes[-1].set_xlabel("Training Steps [k]")
 
-    # De-duplicate legend entries
-    handles, labels = axes[0].get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    axes[0].legend(by_label.values(), by_label.keys(), title="Model-Class / Size", loc="upper right")
+    # # De-duplicate legend entries
+    # handles, labels = axes[0].get_legend_handles_labels()
+    # by_label = dict(zip(labels, handles))
 
-    plt.tight_layout()
+    # # Move legend upward (can extend beyond axes)
+    # axes[0].legend(
+    #     by_label.values(),
+    #     by_label.keys(),
+    #     title="Model-Class / Size",
+    #     loc="lower right",
+    #     bbox_to_anchor=(1.0, 1.02),
+    #     borderaxespad=0.0,
+    # )
+
+    plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.96])
     plt.show()
+
+
 
 
 # ----------------------------
@@ -3539,6 +3569,11 @@ def plot_component_bias_rmse_2x2(
     vmax_rmse = vmax_rmse if (np.isfinite(vmax_rmse) and vmax_rmse > 0) else 1.0
 
     fig, axes = plt.subplots(2, 2, figsize=(8.0, 5.5), constrained_layout=True)
+    fig.suptitle(
+    "Dataset 1 - $P_{i,j}$ Component-wise Bias and RMSE (Median over Inits)",
+    fontsize=14,
+    )
+
 
     # --- Bias row
     bias_norm = SymLogNorm(
@@ -3592,10 +3627,10 @@ def plot_component_bias_rmse_2x2(
 
     # Colorbars (one per row)
     cbar1 = fig.colorbar(im00, ax=axes[0, :], fraction=0.035, pad=0.02)
-    cbar1.set_label("bias (median over inits)")
+    cbar1.set_label("Bias")
 
     cbar2 = fig.colorbar(im10, ax=axes[1, :], fraction=0.035, pad=0.02)
-    cbar2.set_label("RMSE (median over inits)")
+    cbar2.set_label("RMSE")
 
     plt.show()
 
@@ -3663,7 +3698,7 @@ def plot_task5_2_vs_5_3_train_test_rmse_vs_steps_parallel(
     include_wf_aug: bool = False,
     art_dir_54: str | None = None,
     wf_aug_observers: int = 64,     # use the WF_AUG trained with obs{K}
- demonstrate: bool = False,
+    demonstrate: bool = False,
 ):
     """
     2 panels:
@@ -3694,7 +3729,6 @@ def plot_task5_2_vs_5_3_train_test_rmse_vs_steps_parallel(
     if include_wf_aug:
         if art_dir_54 is None:
             raise ValueError("include_wf_aug=True requires art_dir_54='artifacts/task5_4'")
-        # meta.model_id might not be WF_AUG; filter by tag instead
         runs_wf_aug = ewf.load_runs(
             art_dir_54,
             model_id=None,
@@ -3726,7 +3760,6 @@ def plot_task5_2_vs_5_3_train_test_rmse_vs_steps_parallel(
             n = int(m.group(2))
             steps = int(m.group(3))
 
-            # map (l,n) -> size bucket
             if (l, n) == (2, 8):
                 arch = "small"
             elif (l, n) == (3, 16):
@@ -3819,21 +3852,36 @@ def plot_task5_2_vs_5_3_train_test_rmse_vs_steps_parallel(
 
     # --- Plot ---
     fig, axes = plt.subplots(2, 1, figsize=(8, 6.5), sharex=True)
-    if title is None:
-        title = f"Task 5.2 vs 5.3 (+5.4) — {metric}-RMSE vs training steps ({agg} over inits)" if include_wf_aug \
-                else f"Task 5.2 vs 5.3 — {metric}-RMSE vs training steps ({agg} over inits)"
-    fig.suptitle(title)
+
+    # Force requested title regardless of metric/include_wf_aug.
+    if metric == "P":
+        fig.suptitle("Dataset 3 - Stress RMSE vs Training Steps (Median over Inits)")
+    else:
+        fig.suptitle("Dataset 3 - Stress RMSE vs Training Steps (Median over Inits)")
 
     ylo, yhi = _safe_pos_limits(all_yvals, pad=1.20)
 
     # style maps
     color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2"])
-    class_colors = {"WICUB": color_cycle[0], "WF": color_cycle[1], "WF_AUG": color_cycle[1]}  # WF_AUG same as WF
+    class_colors = {"WICUB": color_cycle[0], "WF": color_cycle[1], "WF_AUG": color_cycle[1]}
     size_linestyles = {"small": ":", "medium": "-", "large": "--"}
-    markers = {"WICUB": "o", "WF": "o", "WF_AUG": "s"}  # distinguish augmented
+    markers = {"WICUB": "o", "WF": "o", "WF_AUG": "s"}
 
-    panels = [("train", "Training RMSE (calibration)"),
-              ("test",  "Test RMSE (all test keys)")]
+    # Pretty name mapping
+    pretty_model = {
+        "WICUB": r"$W^{I}_{\mathrm{cub}}$",
+        "WF": r"$W^{F}$",
+        "WF_AUG": r"$W^{F}_{\mathrm{aug}}$",
+    }
+
+    def _pretty_label(m: str, a: str) -> str:
+        base = pretty_model.get(m, m)
+        return f"{base} {a}"
+
+    panels = [
+        ("train", "Training RMSE"),
+        ("test",  "Test RMSE"),
+    ]
 
     for ax, (split, ylabel) in zip(axes, panels):
         for m in model_names:
@@ -3847,7 +3895,7 @@ def plot_task5_2_vs_5_3_train_test_rmse_vs_steps_parallel(
                     linestyle=size_linestyles.get(a, "-"),
                     color=class_colors[m],
                     linewidth=2,
-                    label=f"{m}-{a}",
+                    label=_pretty_label(m, a),
                 )
 
         ax.set_yscale("log")
@@ -3864,6 +3912,7 @@ def plot_task5_2_vs_5_3_train_test_rmse_vs_steps_parallel(
 
     plt.tight_layout()
     plt.show()
+
 
 
 
@@ -3987,6 +4036,7 @@ def plot_task5_wicub_vs_wf_component_bias_rmse_2x2(
     rmse_norm = LogNorm(vmin=max(vmax_rmse * 1e-4, 1e-12), vmax=vmax_rmse)
 
     fig, axes = plt.subplots(2, 2, figsize=(8.2, 5.6), constrained_layout=True)
+    fig.suptitle("Dataset 3 - $P_{i,j}$ Component-wise Bias and RMSE (Median over Inits)", fontsize=14)
 
     im00 = axes[0, 0].imshow(np.asarray(bias_wicub), cmap="RdBu_r", norm=bias_norm)
     im01 = axes[0, 1].imshow(np.asarray(bias_wf),    cmap="RdBu_r", norm=bias_norm)
@@ -4017,10 +4067,10 @@ def plot_task5_wicub_vs_wf_component_bias_rmse_2x2(
 
     # one colorbar per row (same as your reference)
     cb1 = fig.colorbar(im00, ax=axes[0, :], fraction=0.045, pad=0.02)
-    cb1.set_label(f"bias ({reduce} over inits)")
+    cb1.set_label(f"Bias")
 
     cb2 = fig.colorbar(im10, ax=axes[1, :], fraction=0.045, pad=0.02)
-    cb2.set_label(f"RMSE ({reduce} over inits)")
+    cb2.set_label(f"RMSE")
 
     plt.show()
 
@@ -4090,19 +4140,25 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
     num_observers_eval: int = 64,
     reduce_inits: str = "median",   # "median" | "mean"
     n_jobs: int = -2,
-    backend: str = "threading",     # "threading" usually best with JAX inference
+    backend: str = "threading",
 
     # how to load WF_AUG runs
-    model_id: str = "WF_AUG",       # kept for API compatibility; we filter via tag_contains
+    model_id: str = "WF_AUG",
     title: str | None = None,
     ylog: bool = True,
 
-    # NEW: baseline from WICUB-medium
+    # baseline from WICUB-medium
     add_wicub_baseline: bool = True,
-    art_dir_52: str | None = None,          # e.g. "artifacts/task5_2"
-    G_cub: jnp.ndarray | None = None,       # required to load WICUB
+    art_dir_52: str | None = None,
+    G_cub: jnp.ndarray | None = None,
     wicub_arch: str = "medium",
-    wicub_steps: int = 300_000,             # choose 100k/300k depending on what you want as baseline
+    wicub_steps: int = 300_000,
+
+    # NEW baseline from WF-medium (task 5.3)
+    add_wf_baseline: bool = True,
+    art_dir_53: str | None = None,     # e.g. "artifacts/task5_3"
+    wf_arch: str = "medium",
+    wf_steps: int = 300_000,
 ):
     """
     Task 5.4 objectivity plot:
@@ -4110,8 +4166,9 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
       Top panel: P objectivity errors (mean + max)
       Bottom panel: W objectivity errors (mean + max)
 
-    NEW: optionally overlay WICUB-medium baseline as dotted red horizontal lines
-         (both mean and max for P and W).
+    Overlays optional baselines:
+      - WICUB-medium (red dotted)
+      - WF-medium (green dotted)
     """
 
     import numpy as np
@@ -4126,6 +4183,16 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
     F_test = dataset_3["F_test"]
 
     # ----------------------------
+    # Pretty labels
+    # ----------------------------
+    pretty_aug   = r"$W^{F}_{\mathrm{aug}}$"
+    pretty_wicub = r"$W^{I}_{\mathrm{cub}}$"
+    pretty_wf    = r"$W^{F}$"
+
+    red = (reduce_inits or "").strip().lower()
+    red_pretty = "Median" if red == "median" else ("Mean" if red == "mean" else reduce_inits)
+
+    # ----------------------------
     # Load WF_AUG runs (robust)
     # ----------------------------
     runs_aug = ewf.load_runs(
@@ -4136,7 +4203,6 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
         strict=False,
     )
     if not runs_aug:
-        # fallback: in case meta.model_id is correct in your setup
         runs_aug = ewf.load_runs(
             art_dir_54,
             model_id=model_id,
@@ -4148,7 +4214,6 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
             f"No WF_AUG runs found in {art_dir_54}. Tried tag_contains='WF_AUG_' and model_id={model_id!r}."
         )
 
-    # parse observer count from tag: "..._obs{K}_..."
     def _parse_obs(tag: str) -> int | None:
         m = re.search(r"obs(\d+)", tag)
         return int(m.group(1)) if m else None
@@ -4169,14 +4234,14 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
                            P_error_mean=np.nan, P_error_max=np.nan)
 
         models = [rr.model for rr in rs]
-        key = jax.random.PRNGKey(0)  # reproducible
+        key = jax.random.PRNGKey(0)
 
         stats = evaluate_objectivity_multi_inits(
             models,
             F_test=F_test,
             num_observers=num_observers_eval,
             key=key,
-            model_type="WF",   # WF_AUG models are still WF-type (input: F)
+            model_type="WF",
             G=None,
             reduce=reduce_inits,
         )
@@ -4194,9 +4259,9 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
     W_max  = [results[o]["W_error_max"]  for o in xs]
 
     # ----------------------------
-    # Optional baseline: WICUB-medium (horizontal red dotted lines)
+    # Optional baseline: WICUB-medium
     # ----------------------------
-    baseline = None
+    baseline_wicub = None
     if add_wicub_baseline:
         if art_dir_52 is None:
             raise ValueError("add_wicub_baseline=True requires art_dir_52='artifacts/task5_2'")
@@ -4213,7 +4278,7 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
         if not runs_wicub:
             raise FileNotFoundError(f"No WICUB runs found in {art_dir_52}")
 
-        def _parse_arch_steps(tag: str):
+        def _parse_arch_steps_wicub(tag: str):
             m = re.search(r"_(small|medium|large)_l\d+_n\d+_steps(\d+)", tag, flags=re.IGNORECASE)
             if not m:
                 return None, None
@@ -4221,7 +4286,7 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
 
         wicub_sel = []
         for r in runs_wicub:
-            arch, steps = _parse_arch_steps(r.tag)
+            arch, steps = _parse_arch_steps_wicub(r.tag)
             if arch == wicub_arch.lower() and steps == int(wicub_steps):
                 wicub_sel.append(r)
 
@@ -4231,9 +4296,9 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
             )
 
         models = [rr.model for rr in wicub_sel]
-        key = jax.random.PRNGKey(123)  # separate key
+        key = jax.random.PRNGKey(123)
 
-        baseline = evaluate_objectivity_multi_inits(
+        baseline_wicub = evaluate_objectivity_multi_inits(
             models,
             F_test=F_test,
             num_observers=num_observers_eval,
@@ -4242,8 +4307,53 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
             G=G_cub,
             reduce=reduce_inits,
         )
-        # baseline dict keys:
-        #   baseline["P_error_mean"], baseline["P_error_max"], baseline["W_error_mean"], baseline["W_error_max"]
+
+    # ----------------------------
+    # NEW baseline: WF-medium (task 5.3)
+    # ----------------------------
+    baseline_wf = None
+    if add_wf_baseline:
+        if art_dir_53 is None:
+            raise ValueError("add_wf_baseline=True requires art_dir_53='artifacts/task5_3'")
+
+        runs_wf = ewf.load_runs(
+            art_dir_53,
+            model_id="WF",
+            dataset_3=dataset_3,
+            strict=False,
+        )
+        if not runs_wf:
+            raise FileNotFoundError(f"No WF runs found in {art_dir_53}")
+
+        def _parse_arch_steps_wf(tag: str):
+            m = re.search(r"_(small|medium|large)_l\d+_n\d+_steps(\d+)", tag, flags=re.IGNORECASE)
+            if not m:
+                return None, None
+            return m.group(1).lower(), int(m.group(2))
+
+        wf_sel = []
+        for r in runs_wf:
+            arch, steps = _parse_arch_steps_wf(r.tag)
+            if arch == wf_arch.lower() and steps == int(wf_steps):
+                wf_sel.append(r)
+
+        if not wf_sel:
+            raise ValueError(
+                f"No WF runs found for arch={wf_arch}, steps={wf_steps} in {art_dir_53}"
+            )
+
+        models = [rr.model for rr in wf_sel]
+        key = jax.random.PRNGKey(456)
+
+        baseline_wf = evaluate_objectivity_multi_inits(
+            models,
+            F_test=F_test,
+            num_observers=num_observers_eval,
+            key=key,
+            model_type="WF",
+            G=None,
+            reduce=reduce_inits,
+        )
 
     # ----------------------------
     # Plot
@@ -4251,38 +4361,56 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
     fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
 
     if title is None:
-        title = f"Task 5.4 — Objectivity error vs training observers ({reduce_inits} over inits)"
+        title = f"Dataset 3 - Objectivity Evaluation ({red_pretty} over Inits)"
     fig.suptitle(title)
 
     # Top: P
-    axes[0].plot(xs, P_mean, marker="o", label="WF_AUG P mean error")
-    axes[0].plot(xs, P_max,  marker="o", label="WF_AUG P max error")
-    if baseline is not None:
+    axes[0].plot(xs, P_mean, marker="o", label=rf"{pretty_aug} Mean error")
+    axes[0].plot(xs, P_max,  marker="o", label=rf"{pretty_aug} Max error")
+
+    if baseline_wicub is not None:
         axes[0].axhline(
-            baseline["P_error_mean"],
+            baseline_wicub["P_error_mean"],
             color="red", linestyle=":", linewidth=2,
-            label=f"WICUB-{wicub_arch} P mean error"
+            label=rf"{pretty_wicub} Mean error"
         )
 
+    if baseline_wf is not None:
+        axes[0].axhline(
+            baseline_wf["P_error_mean"],
+            color="green", linestyle=":", linewidth=2,
+            label=rf"{pretty_wf} Mean error"
+        )
 
-    axes[0].set_ylabel("P objectivity error")
-    axes[0].grid(True, which="both", linestyle="--", alpha=0.4)
+    axes[0].set_ylabel(r"$P$ Objectivity Error")
+    axes[0].grid(True, axis="x", which="major", linestyle="--", alpha=0.4)
+    axes[0].grid(False, axis="y")
     axes[0].legend(loc="best")
 
     # Bottom: W
-    axes[1].plot(xs, W_mean, marker="o", label="WF_AUG W mean error")
-    axes[1].plot(xs, W_max,  marker="o", label="WF_AUG W max error")
-    if baseline is not None:
+    axes[1].plot(xs, W_mean, marker="o", label=rf"{pretty_aug} Mean error")
+    axes[1].plot(xs, W_max,  marker="o", label=rf"{pretty_aug} Max error")
+
+    if baseline_wicub is not None:
         axes[1].axhline(
-            baseline["W_error_mean"],
+            baseline_wicub["W_error_mean"],
             color="red", linestyle=":", linewidth=2,
-            label=f"WICUB-{wicub_arch} W mean error"
+            label=rf"{pretty_wicub} Mean error"
         )
 
-    axes[1].set_ylabel("W objectivity error")
-    axes[1].set_xlabel("Observers added to training set")
-    axes[1].grid(True, which="both", linestyle="--", alpha=0.4)
-    axes[1].legend(loc="best")
+    if baseline_wf is not None:
+        axes[1].axhline(
+            baseline_wf["W_error_mean"],
+            color="green", linestyle=":", linewidth=2,
+            label=rf"{pretty_wf} Mean error"
+        )
+
+    axes[1].set_ylabel(r"$W$ Objectivity Error")
+    axes[1].set_xlabel("Observers added to Training Set")
+
+    axes[1].grid(True, axis="x", which="major", linestyle="--", alpha=0.4)
+    axes[1].grid(False, axis="y")
+    # axes[1].legend(loc="best")
 
     if ylog:
         axes[0].set_yscale("log")
@@ -4290,6 +4418,8 @@ def plot_task5_4_objectivity_vs_aug_observers_parallel(
 
     plt.tight_layout()
     plt.show()
+
+
 
 
 # ----------------------------
