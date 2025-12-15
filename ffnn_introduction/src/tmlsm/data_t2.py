@@ -7,6 +7,7 @@ import numpy as np
 import os
 import pandas as pd
 import h5py
+from collections import Counter
 
 def load_hyperelastic_data(filepath):
   """
@@ -883,3 +884,5 @@ def run_generalization_experiment_parallel(
     print(f"Completed {len(results)} experiments")
     
     return pd.DataFrame(results)
+
+

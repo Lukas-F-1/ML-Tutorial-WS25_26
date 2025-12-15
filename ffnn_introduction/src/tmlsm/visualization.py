@@ -4,6 +4,7 @@ import pandas as pd
 import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import matplotlib.patches as mpatches
 import jax.numpy as jnp
 import jax
 from . import data_t2 as td2
@@ -70,122 +71,117 @@ def plot_load_path_space(datasets_dict, title="Load Path Map: Interpolation Chec
     plt.tight_layout()
     plt.show()
 
-def plot_deformation_state_space(datasets_dict, components=None, title="State Space: Shear vs. Stretch Intensity"):
+def plot_deformation_state_space(datasets_dict, components=None, title="State Space: Shear vs. Stretch Intensity", tensor_name="F"):
     """
-    Visualizes the distribution of F-components using Boxplots in a 3x3 grid
-    matching the tensor structure of F.
-    
-    Args:
-        datasets_dict: Dictionary with data.
-        components: List of strings determining which tensor components to plot.
-                    If None, all 9 components are plotted.
+    Visualizes the distribution of tensor components using Boxplots in a 3x3 grid.
     """
-    import pandas as pd
-    import seaborn as sns
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
     
+    # --- EINSTELLUNGEN FÜR SCHRIFTGRÖSSEN ---
+    TITLE_SIZE = 24       # Haupttitel oben
+    SUBPLOT_TITLE_SIZE = 24 # F11, F12 etc.
+    AXIS_LABEL_SIZE = 24  # "Value" an der Seite
+    TICK_SIZE = 24        # Die Zahlen/Texte an den Achsen (Deine Anfrage)
+    LEGEND_SIZE = 20      # Legende unten
+    # ----------------------------------------
+
     # Default: alle 9 Komponenten
     if components is None:
-        components = ["F11", "F12", "F13", "F21", "F22", "F23", "F31", "F32", "F33"]
+        components = [f"{tensor_name}11", f"{tensor_name}12", f"{tensor_name}13", 
+                      f"{tensor_name}21", f"{tensor_name}22", f"{tensor_name}23", 
+                      f"{tensor_name}31", f"{tensor_name}32", f"{tensor_name}33"]
     
-    # Mapping string "F12" -> indices (row, col) im Grid und im Tensor
+    # Mapping
     comp_map = {
-        "F11": (0, 0), "F12": (0, 1), "F13": (0, 2),
-        "F21": (1, 0), "F22": (1, 1), "F23": (1, 2),
-        "F31": (2, 0), "F32": (2, 1), "F33": (2, 2)
+        f"{tensor_name}11": (0, 0), f"{tensor_name}12": (0, 1), f"{tensor_name}13": (0, 2),
+        f"{tensor_name}21": (1, 0), f"{tensor_name}22": (1, 1), f"{tensor_name}23": (1, 2),
+        f"{tensor_name}31": (2, 0), f"{tensor_name}32": (2, 1), f"{tensor_name}33": (2, 2)
     }
     
-    # Kurzbezeichnungen und Farben für die Loadpaths
+    # Labels (gekürzt für Übersichtlichkeit im Snippet)
     label_abbrev = {
-        "Train: Uniaxial": "Uni",
-        "Train: Pure Shear": "PS",
-        "Train: Biaxial": "Bi",
-        "Test: Biaxial": "Bi*",
-        "Test: Mixed": "Mix*",
-        "Task4: Concentric": "T4"
+        "Train: Uniaxial": "Uni", "Train: Pure Shear": "PS", "Train: Biaxial": "Bi",
+        "Test: Biaxial": "Bi*", "Test: Mixed": "Mix*", "Task4: Concentric": "T4",
+        "uniaxial": "Uni", "biaxial": "Biax", "biplanar": "BiPl", "planar": "Plan",
+        "shear_simple": "ShS", "shear_combined": "ShC", "volumetric": "Vol",
     }
     
-    # Farbpalette (konsistent für alle Plots)
+    # Palette
     palette = sns.color_palette("tab10", n_colors=len(datasets_dict))
     color_map = {label: palette[i] for i, label in enumerate(datasets_dict.keys())}
     
-    # 1. Daten vorbereiten und globale Y-Grenzen bestimmen
+    # Daten vorbereiten
     records = {comp: [] for comp in comp_map.keys()}
     global_min, global_max = float('inf'), float('-inf')
     
     for label, data in datasets_dict.items():
-        F = data[0] if isinstance(data, (tuple, list)) else data
+        arr = data[0] if isinstance(data, (tuple, list)) else data
         category = "Test" if "Test" in label else "Train"
-        abbrev = label_abbrev.get(label, label[:3])
+        abbrev = label_abbrev.get(label, label[:4])
         
-        # Globale Min/Max tracken
-        global_min = min(global_min, F.min())
-        global_max = max(global_max, F.max())
+        global_min = min(global_min, arr.min())
+        global_max = max(global_max, arr.max())
         
         for comp_name, (i, j) in comp_map.items():
-            values = F[:, i, j]
+            values = arr[:, i, j]
             for val in values:
                 records[comp_name].append({
-                    "Dataset": label,
-                    "Abbrev": abbrev,
-                    "Type": category,
-                    "Value": float(val)
+                    "Dataset": label, "Abbrev": abbrev, "Type": category, "Value": float(val)
                 })
     
-    # Etwas Padding für die Y-Achse
     y_padding = (global_max - global_min) * 0.05
     y_limits = (global_min - y_padding, global_max + y_padding)
     
-    # 2. 3x3 Grid erstellen
-    fig, axes = plt.subplots(3, 3, figsize=(12, 10))
+    # Plot erstellen
+    fig, axes = plt.subplots(3, 3, figsize=(16, 13))
     
     for comp_name, (row, col) in comp_map.items():
         ax = axes[row, col]
-        
-        # DataFrame für diese Komponente
         df_comp = pd.DataFrame(records[comp_name])
         
         if comp_name in components and not df_comp.empty:
-            # Boxplot mit Kurzbezeichnungen
             sns.boxplot(data=df_comp, x="Abbrev", y="Value", hue="Dataset",
-                       palette=color_map, ax=ax, width=0.7, dodge=False,
-                       legend=False)
+                        palette=color_map, ax=ax, width=0.7, dodge=False, legend=False)
             
-            ax.set_title(f"$F_{{{row+1}{col+1}}}$", fontsize=14, fontweight='bold')
+            # ### NEU: Titelgröße angepasst
+            ax.set_title(f"${tensor_name}_{{{row+1}{col+1}}}$", fontsize=SUBPLOT_TITLE_SIZE, fontweight='bold')
             ax.set_xlabel("")
             ax.set_ylabel("")
-            ax.set_ylim(y_limits)  # Einheitliche Y-Skala
+            ax.set_ylim(y_limits)
             
-            # X-Achsen Labels nur in der untersten Reihe
+            # ### NEU: Y-Achsen Schriftgröße (labelsize)
+            ax.tick_params(axis='y', labelsize=TICK_SIZE)
+            
+            # X-Achsen Handling
             if row < 2:
                 ax.set_xticklabels([])
             else:
-                ax.tick_params(axis='x', labelsize=10)
+                # ### NEU: X-Achsen Schriftgröße (labelsize)
+                ax.tick_params(axis='x', labelsize=TICK_SIZE, rotation=45)
                 
         else:
             ax.set_visible(False)
         
         ax.grid(True, linestyle=':', alpha=0.6, axis='y')
     
-    # 3. Gemeinsame Legende erstellen
+    # Legende
     legend_patches = [mpatches.Patch(color=color_map[label], 
-                                      label=f"{label_abbrev.get(label, label)} = {label}")
-                     for label in datasets_dict.keys()]
+                                     label=f"{label_abbrev.get(label, label)} = {label}")
+                      for label in datasets_dict.keys()]
     
-    fig.legend(handles=legend_patches, 
-              loc='lower center', 
-              ncol=3,
-              fontsize=11,
-              framealpha=0.9,
-              bbox_to_anchor=(0.5, -0.02))
+    fig.legend(handles=legend_patches, loc='lower center', ncol=4,
+               fontsize=LEGEND_SIZE, # ### NEU: Legendengröße
+               framealpha=0.9, bbox_to_anchor=(0.5, -0.01))
     
-    # Gemeinsame Y-Achsenbeschriftung
-    fig.text(0.02, 0.5, 'Value', va='center', rotation='vertical', fontsize=12)
+    # Globale Y-Achsenbeschriftung
+    fig.text(0.02, 0.5, 'Value', va='center', rotation='vertical', fontsize=AXIS_LABEL_SIZE) # ### NEU
     
-    plt.suptitle(title, fontsize=16, fontweight='bold')
-    plt.tight_layout(rect=[0.04, 0.08, 1, 0.96])
+    # Haupttitel
+    plt.suptitle(title, fontsize=TITLE_SIZE) # ### NEU
+    
+    plt.tight_layout(rect=[0.04, 0.07, 1, 0.96])
     plt.show()
+    
+    return fig
 
 def visualize_deformation_3d(F, step_index=0):
     """
@@ -595,14 +591,23 @@ def plot_generalization_heatmap(results_df, title="Model Generalization: Test Er
 
 def plot_generalization_heatmap_from_artifacts(
     results_df, 
-    title="Model Generalization: Test Error Heatmap",
+    title="Influence of Training Dataset Size on RMSE (Mean over Inits)",
     log_scale=True,
-    figsize=(14, 6),
+    figsize=(14, 6), # Etwas höher damit die Labels Platz haben
 ):
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
     from matplotlib.colors import LogNorm
+
+    # --- KONFIGURATION SCHRIFTGRÖSSEN ---
+    TITLE_SIZE = 18
+    LABEL_SIZE = 16      # Achsenbeschriftung (z.B. "Run 0")
+    AXIS_TITLE_SIZE = 18 # "Number of Training..."
+    TICK_SIZE = 14       # Die Zahlen an den Achsen
+    CELL_TEXT_SIZE = 10   # Die Zahlen im Heatmap
+    CBAR_SIZE = 14       # Legendenbeschriftung
+    # ------------------------------------
 
     df = results_df.copy()
     
@@ -610,7 +615,15 @@ def plot_generalization_heatmap_from_artifacts(
     if 'Init' in df.columns:
         df = df.groupby(['Model', 'N_Train_Paths', 'Run'])['Test_Error'].mean().reset_index()
     
-    models = ['Naive FFNN', 'PANN']
+    # Modelle wie sie im DataFrame stehen
+    models_in_df = ['Naive FFNN', 'PANN']
+    
+    # Mapping für die Anzeige (LaTeX Syntax)
+    display_names = {
+        'Naive FFNN': r'$M^S_w$',  # r'' String für LaTeX
+        'PANN': r'$W^I$'
+    }
+    
     n_paths_list = sorted(df['N_Train_Paths'].unique())
     n_runs = df['Run'].nunique()
     
@@ -626,8 +639,8 @@ def plot_generalization_heatmap_from_artifacts(
     else:
         norm = None
 
-    for ax, model_name in zip(axes, models):
-        model_df = df[df['Model'] == model_name]
+    for ax, model_key in zip(axes, models_in_df):
+        model_df = df[df['Model'] == model_key]
         pivot = model_df.pivot(index='Run', columns='N_Train_Paths', values='Test_Error')
         pivot = pivot.reindex(columns=n_paths_list)
         
@@ -636,36 +649,46 @@ def plot_generalization_heatmap_from_artifacts(
         else:
             im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn_r', vmin=vmin, vmax=vmax)
         
+        # Text in den Zellen
         for i in range(pivot.shape[0]):
             for j in range(pivot.shape[1]):
                 val = pivot.values[i, j]
                 if not np.isnan(val):
+                    # Kontrastberechnung für Textfarbe
                     if log_scale:
                         is_middle = (vmin * 2 < val < vmax / 2)
                     else:
                         is_middle = (vmin + (vmax-vmin)*0.3 < val < vmin + (vmax-vmin)*0.7)
                     text_color = 'black' if is_middle else 'white'
+                    
                     ax.text(j, i, f'{val:.2f}', ha='center', va='center',
-                            fontsize=6, color=text_color, fontweight='bold')
+                            fontsize=CELL_TEXT_SIZE, color=text_color) # Kein bold mehr
         
+        # Y-Achse konfigurieren
         ax.set_yticks(range(n_runs))
-        ax.set_yticklabels([f'Run {r}' for r in range(n_runs)])
-        ax.set_ylabel(model_name, fontsize=12, fontweight='bold')
+        ax.set_yticklabels([f'Run {r}' for r in range(n_runs)], fontsize=TICK_SIZE)
+        
+        # Hier wird der Name ersetzt!
+        ax.set_ylabel(display_names.get(model_key, model_key), fontsize=LABEL_SIZE)
         
         for spine in ax.spines.values():
-            spine.set_linewidth(2)
+            spine.set_linewidth(1.5) # Rahmen etwas dünner als vorher (war 2)
     
+    # X-Achse (nur unten)
     axes[1].set_xticks(range(len(n_paths_list)))
-    axes[1].set_xticklabels([str(n) for n in n_paths_list], rotation=45, ha='right')
-    axes[1].set_xlabel('Number of Training Loadpaths', fontsize=12)
+    axes[1].set_xticklabels([str(n) for n in n_paths_list], rotation=45, ha='right', fontsize=TICK_SIZE)
+    axes[1].set_xlabel('Number of Training Load Paths', fontsize=TICK_SIZE)
     
     plt.tight_layout(rect=[0, 0, 0.9, 1])
     
+    # Colorbar
     cbar = fig.colorbar(im, ax=axes, shrink=0.8, pad=0.02, aspect=30)
     scale_label = "Log Scale" if log_scale else "Linear Scale"
-    cbar.set_label(f'Test Error (RMSE) - {scale_label}', fontsize=11)
+    cbar.set_label(f'Test RMSE', fontsize=CBAR_SIZE)
+    cbar.ax.tick_params(labelsize=TICK_SIZE) # Größe der Zahlen an der Colorbar
     
-    plt.suptitle(title, fontsize=14, fontweight='bold', y=1.02)
+    # Titel (nicht mehr fett)
+    plt.suptitle(title, fontsize=TITLE_SIZE, y=1.02, x=0.4)
     
     return fig
 
