@@ -1,0 +1,23 @@
+{
+  "task": "2.2",
+  "model_id": "MS",
+  "tag": "MS_medium_l3_n16_steps70000_init05",
+  "arch_name": "medium",
+  "num_hidden_layers": 3,
+  "nodes_per_layer": 16,
+  "activation": "softplus",
+  "steps": 70000,
+  "init_idx": 5,
+  "n_inits": 20,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "train_dataset": "Dataset 1 calibration (uni + pure_shear + biax)",
+  "test_sets": [
+    "biax_test",
+    "mixed_test"
+  ],
+  "rmse_biax_test": 1.6646435260772705,
+  "rmse_mixed_test": 7.53311824798584,
+  "saved_model_path": "artifacts\\task2_2\\MS_medium_l3_n16_steps70000_init05.eqx",
+  "saved_history_path": "artifacts\\task2_2\\MS_medium_l3_n16_steps70000_init05_history.pkl"
+}
