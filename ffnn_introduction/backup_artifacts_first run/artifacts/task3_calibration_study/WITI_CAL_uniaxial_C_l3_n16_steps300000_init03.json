@@ -1,0 +1,33 @@
+{
+  "task": "3_calibration_study",
+  "model_id": "WITI",
+  "tag": "WITI_CAL_uniaxial_C_l3_n16_steps300000_init03",
+  "subset": [
+    "uniaxial"
+  ],
+  "subset_tag": "uniaxial",
+  "architecture": {
+    "l": 3,
+    "n": 16,
+    "activation": "softplus"
+  },
+  "strategy": "C",
+  "loss": "WeightedSobolevLoss",
+  "loss_params": {
+    "alpha": 1.0,
+    "beta": 1.0
+  },
+  "steps": 300000,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "loss_weighting": "inverse path weights computed on subset paths",
+  "weights_by_path": {
+    "uniaxial": {
+      "w": 51.73220443725586,
+      "w_inv": 0.01933031901717186,
+      "n_samples": 199
+    }
+  },
+  "saved_model_path": "artifacts\\task3_calibration_study\\WITI_CAL_uniaxial_C_l3_n16_steps300000_init03.eqx",
+  "saved_history_path": "artifacts\\task3_calibration_study\\WITI_CAL_uniaxial_C_l3_n16_steps300000_init03_history.pkl"
+}

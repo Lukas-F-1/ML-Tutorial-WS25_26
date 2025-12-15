@@ -1,0 +1,20 @@
+{
+  "task": "3_section2",
+  "model_id": "WITI",
+  "strategy": "C",
+  "tag": "WITI_C_medium_l3_n16_steps900000_init10",
+  "num_hidden_layers": 3,
+  "nodes_per_layer": 16,
+  "activation": "softplus",
+  "steps": 900000,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "loss": "WeightedSobolevLoss",
+  "loss_params": {
+    "alpha": 1.0,
+    "beta": 1.0
+  },
+  "loss_weighting": "inverse path weights (uniaxial, pure shear, biaxial)",
+  "saved_model_path": "artifacts\\task3_section2\\WITI_C_medium_l3_n16_steps900000_init10.eqx",
+  "saved_history_path": "artifacts\\task3_section2\\WITI_C_medium_l3_n16_steps900000_init10_history.pkl"
+}

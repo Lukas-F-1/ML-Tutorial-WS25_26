@@ -1,0 +1,27 @@
+{
+  "task": "2.3",
+  "model_id": "MSW",
+  "tag": "MSW_medium_l3_n16_steps300000_init05",
+  "architecture_note": "MEDIUM baseline from Task 2.2: l=3, n=16, softplus",
+  "comparison_note": "Compare to Task 2.2 MS (unweighted) with l=3, n=16 and steps=300000",
+  "num_hidden_layers": 3,
+  "nodes_per_layer": 16,
+  "activation": "softplus",
+  "steps": 300000,
+  "init_idx": 5,
+  "n_inits": null,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "loss": "WeightedMSE",
+  "weights": {
+    "w_uni": 51.73220443725586,
+    "w_ps": 29.98426628112793,
+    "w_bi": 71.38219451904297,
+    "w_uni_inv": 0.01933031901717186,
+    "w_ps_inv": 0.03335082530975342,
+    "w_bi_inv": 0.01400909572839737
+  },
+  "base_seed": 1327077,
+  "saved_model_path": "artifacts\\task2_3\\MSW_medium_l3_n16_steps300000_init05.eqx",
+  "saved_history_path": "artifacts\\task2_3\\MSW_medium_l3_n16_steps300000_init05_history.pkl"
+}

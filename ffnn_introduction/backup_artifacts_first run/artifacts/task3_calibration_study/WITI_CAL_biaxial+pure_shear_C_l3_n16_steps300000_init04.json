@@ -1,0 +1,39 @@
+{
+  "task": "3_calibration_study",
+  "model_id": "WITI",
+  "tag": "WITI_CAL_biaxial+pure_shear_C_l3_n16_steps300000_init04",
+  "subset": [
+    "biaxial",
+    "pure_shear"
+  ],
+  "subset_tag": "biaxial+pure_shear",
+  "architecture": {
+    "l": 3,
+    "n": 16,
+    "activation": "softplus"
+  },
+  "strategy": "C",
+  "loss": "WeightedSobolevLoss",
+  "loss_params": {
+    "alpha": 1.0,
+    "beta": 1.0
+  },
+  "steps": 300000,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "loss_weighting": "inverse path weights computed on subset paths",
+  "weights_by_path": {
+    "biaxial": {
+      "w": 71.38219451904297,
+      "w_inv": 0.01400909572839737,
+      "n_samples": 199
+    },
+    "pure_shear": {
+      "w": 29.98426628112793,
+      "w_inv": 0.03335082530975342,
+      "n_samples": 250
+    }
+  },
+  "saved_model_path": "artifacts\\task3_calibration_study\\WITI_CAL_biaxial+pure_shear_C_l3_n16_steps300000_init04.eqx",
+  "saved_history_path": "artifacts\\task3_calibration_study\\WITI_CAL_biaxial+pure_shear_C_l3_n16_steps300000_init04_history.pkl"
+}
