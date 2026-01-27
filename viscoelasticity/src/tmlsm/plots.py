@@ -43,14 +43,14 @@ def plot_data(eps, eps_dot, sig, omegas, As):
 
     ax = axs[1, 0]
     for i in range(len(eps)):
-        plt.plot(ns, eps[i], color=colors[i], linestyle="--")
+        ax.plot(ns, eps[i], color=colors[i], linestyle="--")
     ax.set_xlim([0, 2 * np.pi])
     ax.set_xlabel("time $t$")
     ax.set_ylabel("strain $\\varepsilon$")
 
     ax = axs[1, 1]
     for i in range(len(eps)):
-        plt.plot(ns, eps_dot[i], color=colors[i], linestyle="--")
+        ax.plot(ns, eps_dot[i], color=colors[i], linestyle="--")
     ax.set_xlim([0, 2 * np.pi])
     ax.set_xlabel("time $t$")
     ax.set_ylabel(r"strain rate $\.{\varepsilon}$")
@@ -83,8 +83,8 @@ def plot_model_pred(eps, sig, sig_m, omegas, As):
 
     ax = axs[1]
     for i in range(len(eps)):
-        plt.plot(eps[i], sig[i], linestyle="--", color=colors[i])
-        plt.plot(eps[i], sig_m[i], color=colors[i])
+        ax.plot(eps[i], sig[i], linestyle="--", color=colors[i])
+        ax.plot(eps[i], sig_m[i], color=colors[i])
     ax.set_xlabel("strain $\\varepsilon$")
     ax.set_ylabel("stress $\\sigma$")
 

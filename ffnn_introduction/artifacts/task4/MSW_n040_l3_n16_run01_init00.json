@@ -6,13 +6,13 @@
   "n_train": 40,
   "run_idx": 1,
   "init_idx": 0,
-  "test_error": 5.8063764572143555,
+  "test_error": 6.287034511566162,
   "architecture": {
     "num_hidden_layers": 3,
     "nodes_per_layer": 16,
     "activation": "softplus"
   },
-  "steps": 100000,
+  "steps": 15000,
   "batch_size": 32,
   "learning_rate": 0.001,
   "test_size": 0.6,
