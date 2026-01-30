@@ -6,5 +6,6 @@ from . import plots
 from . import metrics
 from . import configs
 from . import experiments
+from . import storage
 
-__all__ = ["data", "models", "plots", "metrics", "configs", "experiments"]
+__all__ = ["data", "models", "plots", "metrics", "configs", "experiments", "storage"]

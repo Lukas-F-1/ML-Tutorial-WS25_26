@@ -10,10 +10,22 @@ import jax.random as jrandom
 import klax
 import numpy as np
 
+from pathlib import Path
+
 from .configs import ExperimentConfig, ModelType, MATERIAL_PARAMS
 from .metrics import compute_all_metrics
 from . import data as td
 from . import models as tm
+
+# Patch: Register HistoryCallback as a PyTree node to avoid JAX TypeError
+try:
+    jax.tree_util.register_pytree_node(
+        klax.HistoryCallback,
+        lambda x: ((), x),  # treat as static leaf (aux data)
+        lambda x, _: x,     # reconstruction returns the aux data
+    )
+except Exception:
+    pass
 
 
 # =============================================================================
@@ -184,7 +196,7 @@ def train_model(
     )
 
     train_time = time.time() - t_start
-    final_loss = float(history.history["loss"][-1]) if history.history["loss"] else 0.0
+    final_loss = float(history.loss[-1]) if history.loss else 0.0
 
     return model, train_time, final_loss
 
@@ -218,6 +230,8 @@ def run_experiment(
     config: ExperimentConfig,
     seed: int = 42,
     verbose: bool = True,
+    save_artifacts: bool = False,
+    artifacts_dir: str | Path = "artifacts",
 ) -> ExperimentResult:
     """Run a complete experiment with all specified models."""
     if verbose:
@@ -307,6 +321,15 @@ def run_experiment(
 
         result.model_results[model_type] = model_result
 
+    # Save artifacts if requested
+    if save_artifacts:
+        from . import storage
+        saved = storage.save_experiment(result, artifacts_dir)
+        if verbose:
+            print(f"\nSaved artifacts:")
+            for key, path in saved.items():
+                print(f"  {key}: {path}")
+
     return result
 
 
@@ -317,15 +340,34 @@ def run_sweep(
     experiments: list[ExperimentConfig],
     seed: int = 42,
     verbose: bool = True,
+    save_artifacts: bool = False,
+    artifacts_dir: str | Path = "artifacts",
 ) -> dict[str, ExperimentResult]:
-    """Run multiple experiments and return all results."""
+    """Run multiple experiments and return all results.
+
+    Args:
+        experiments: List of experiment configurations
+        seed: Random seed for reproducibility
+        verbose: Print progress
+        save_artifacts: Save models and results to disk
+        artifacts_dir: Directory for artifacts
+
+    Returns:
+        Dict mapping experiment name to results
+    """
     results = {}
 
     for i, config in enumerate(experiments):
         if verbose:
             print(f"\n[{i+1}/{len(experiments)}] Running experiment: {config.name}")
 
-        result = run_experiment(config, seed=seed, verbose=verbose)
+        result = run_experiment(
+            config,
+            seed=seed,
+            verbose=verbose,
+            save_artifacts=save_artifacts,
+            artifacts_dir=artifacts_dir,
+        )
         results[config.name] = result
 
     if verbose:

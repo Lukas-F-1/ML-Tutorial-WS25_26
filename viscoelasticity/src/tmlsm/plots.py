@@ -9,6 +9,14 @@ import numpy as np
 if TYPE_CHECKING:
     from .experiments import ExperimentResult
 
+from . import data as td
+from . import models as tm
+from . import storage
+from .configs import MATERIAL_PARAMS
+import jax
+import jax.random as jrandom
+
+
 # Colors for loadcases
 LOADCASE_COLORS = np.array(
     [
@@ -379,3 +387,82 @@ def print_results_table(
         print(row)
 
     print("=" * len(header) + "\n")
+
+# =============================================================================
+# Single Model Plotting
+# =============================================================================
+
+def plot_saved_model(filename: str):
+    """Load and plot predictions for a saved model file.
+    
+    Args:
+        filename: Path to the .eqx model file (relative or absolute)
+    """
+    # 1. Metadaten aus Dateinamen extrahieren
+    try:
+        # Erwartet nur den Dateinamen, also pfad entfernen falls vorhanden
+        name_only = str(filename).split("/")[-1].split("\\")[-1]
+        metadata = storage.parse_model_filename(name_only)
+        print(f"Lade Modell: {metadata['model_type']} (Trainiert auf: {metadata['experiment_name']})")
+    except ValueError:
+        print("Konnte Metadaten nicht aus Dateinamen lesen. Stelle sicher, dass das Format stimmt.")
+        return
+
+    model_type = metadata["model_type"]
+    n_timesteps = metadata["n_timesteps"]
+    
+    # 2. Modell-Template erstellen (für Equinox Load)
+    key = jrandom.PRNGKey(0)
+    if model_type == "simple_rnn":
+        model_template = tm.build(key=key)
+    elif model_type == "maxwell_nn":
+        model_template = tm.build_maxwell_nn(
+            key=key, 
+            E_infty=MATERIAL_PARAMS["E_infty"], 
+            E_val=MATERIAL_PARAMS["E"]
+        )
+    elif model_type == "gsm":
+        model_template = tm.build_gsm(key=key, g=1.0/MATERIAL_PARAMS["eta"])
+    else:
+        print(f"Unbekannter Modelltyp: {model_type}")
+        return
+
+    # 3. Modell laden
+    try:
+        model = storage.load_model(filename, model_template)
+    except FileNotFoundError:
+        print(f"Datei nicht gefunden: {filename}")
+        return
+
+    # 4. Testdaten generieren (Baseline Test Set)
+    test_loadcases = [(1.1, 1.0), (1.0, 2.0), (1.0, 3.0)]
+    As = [lc[0] for lc in test_loadcases]
+    omegas = [lc[1] for lc in test_loadcases]
+    
+    # Harmonic Test
+    print("Plotte Harmonic Test...")
+    eps_h, _, sig_h, dts_h = td.generate_data_harmonic(
+        MATERIAL_PARAMS["E_infty"],
+        MATERIAL_PARAMS["E"],
+        MATERIAL_PARAMS["eta"],
+        n_timesteps, # Wichtig: gleiche Zeitauflösung wie im Training/Dateinamen nutzen
+        omegas,
+        As
+    )
+    # Vorhersage (vmap über Batch-Dimension)
+    sig_pred_h = jax.vmap(model)((eps_h, dts_h))
+    plot_model_pred(eps_h, sig_h, sig_pred_h, omegas, As)
+
+    # Relaxation Test
+    print("Plotte Relaxation Test...")
+    eps_r, _, sig_r, dts_r = td.generate_data_relaxation(
+        MATERIAL_PARAMS["E_infty"],
+        MATERIAL_PARAMS["E"],
+        MATERIAL_PARAMS["eta"],
+        n_timesteps,
+        omegas,
+        As
+    )
+    # Vorhersage
+    sig_pred_r = jax.vmap(model)((eps_r, dts_r))
+    plot_model_pred(eps_r, sig_r, sig_pred_r, omegas, As)
