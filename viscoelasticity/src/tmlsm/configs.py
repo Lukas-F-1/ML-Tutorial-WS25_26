@@ -165,57 +165,79 @@ ALL_EXPERIMENTS = [
 # Sweep Generation
 # =============================================================================
 def generate_sweep_configs(
-    param_name: Literal["A", "omega", "n_timesteps", "train_steps"],
-    min_val: float,
-    max_val: float,
-    n_steps: int,
+    param_name: Literal["A", "omega", "n_timesteps", "train_steps", "train_loadcases"],
+    min_val: float | None = None,
+    max_val: float | None = None,
+    n_steps: int | None = None,
     fixed_val: float = 1.0,
-    fixed_loadcase: tuple[float, float] = (1.0, 1.0),
+    fixed_loadcase: list[tuple[float, float]] = [(1.0, 1.0)],
     base_name: str = "sweep",
     train_steps: int = 100_000,
     n_timesteps: int = 100,
+    sweep_values: list[Any] | None = None,
 ) -> list[ExperimentConfig]:
     """Generate a list of experiment configurations for a parameter sweep.
 
     Args:
-        param_name: Parameter to sweep ("A", "omega", "n_timesteps", "train_steps")
-        min_val: Minimum value
-        max_val: Maximum value
-        n_steps: Number of steps
-        fixed_val: Value for the non-swept parameter (only for A/omega sweeps)
-        fixed_loadcase: Loadcase (A, omega) to use for non-loadcase sweeps
+        param_name: Parameter to sweep
+        min_val: Minimum value (for numeric sweep)
+        max_val: Maximum value (for numeric sweep)
+        n_steps: Number of steps (for numeric sweep)
+        fixed_val: Value for the non-swept numeric parameter (A/omega)
+        fixed_loadcase: Base loadcase list [[(A, w), ...]] used when sweeping other params
         base_name: Base name for experiments
-        train_steps: Default training steps (used if not sweeping train_steps)
-        n_timesteps: Default time discretization (used if not sweeping n_timesteps)
+        train_steps: Default training steps
+        n_timesteps: Default time discretization
+        sweep_values: Explicit list of values to sweep over (overrides min/max/n_steps)
 
     Returns:
         List of ExperimentConfig objects
     """
-    values = np.linspace(min_val, max_val, n_steps)
+    if sweep_values is not None:
+        values = sweep_values
+    else:
+        if min_val is None or max_val is None or n_steps is None:
+             raise ValueError("Must provide either sweep_values OR (min_val, max_val, n_steps)")
+        values = np.linspace(min_val, max_val, n_steps)
+
     configs = []
 
-    for val in values:
+    for i, val in enumerate(values):
         # Defaults
         current_train_steps = train_steps
         current_n_timesteps = n_timesteps
-        current_train_loadcase = fixed_loadcase
+        current_train_loadcases = fixed_loadcase
 
         if param_name == "A":
-            current_train_loadcase = (float(val), fixed_val)
+            # For A sweep, we assume fixed_loadcase structure but replace A?
+            # Or simpler: single loadcase (val, fixed_val)
+            # To support multiple loadcases + sweeping A, it gets complex.
+            # Fallback to simple behavior for backward compatibility:
+            current_train_loadcases = [(float(val), fixed_val)]
             name = f"{base_name}_A_{val:.2f}"
             description = f"Sweep A={val:.2f}, omega={fixed_val}"
+        
         elif param_name == "omega":
-            current_train_loadcase = (fixed_val, float(val))
+            current_train_loadcases = [(fixed_val, float(val))]
             name = f"{base_name}_w_{val:.2f}"
             description = f"Sweep A={fixed_val}, omega={val:.2f}"
+        
         elif param_name == "n_timesteps":
             current_n_timesteps = int(val)
             name = f"{base_name}_ts_{current_n_timesteps}"
             description = f"Sweep n_timesteps={current_n_timesteps}"
+        
         elif param_name == "train_steps":
             current_train_steps = int(val)
             name = f"{base_name}_steps_{current_train_steps}"
             description = f"Sweep train_steps={current_train_steps}"
+            
+        elif param_name == "train_loadcases":
+            # Val is a list of tuples [(A, w), ...]
+            current_train_loadcases = val
+            name = f"{base_name}_lc_{i}"
+            description = f"Sweep loadcases (config {i})"
+        
         else:
             raise ValueError(f"Unknown parameter: {param_name}")
 
@@ -225,7 +247,7 @@ def generate_sweep_configs(
         config = ExperimentConfig(
             name=name,
             description=description,
-            train_loadcases=[current_train_loadcase],
+            train_loadcases=current_train_loadcases,
             test_loadcases=test_loadcases,
             train_steps=current_train_steps,
             n_timesteps=current_n_timesteps,
