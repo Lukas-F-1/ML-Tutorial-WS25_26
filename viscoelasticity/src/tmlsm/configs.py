@@ -1,7 +1,7 @@
 """Experiment configurations for viscoelasticity models."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 import numpy as np
 
 

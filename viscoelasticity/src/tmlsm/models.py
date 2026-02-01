@@ -89,7 +89,7 @@ class MaxwellCell(eqx.Module):
         # Evolution equation (explicit Euler)
         gamma_new = gamma + dt * (self.E_val / self.eta) * (eps - gamma)
         # Stress
-        sig = self.E_infty * eps + self.E_val * (eps - gamma_new)
+        sig = self.E_infty * eps + self.E_val * (eps - gamma)
 
         return gamma_new, sig
 
@@ -165,7 +165,7 @@ class MaxwellNNCell(eqx.Module):
         gamma_new = gamma + dt * gamma_dot
 
         # Stress (analytical)
-        sig = self.E_infty * eps + self.E_val * (eps - gamma_new)
+        sig = self.E_infty * eps + self.E_val * (eps - gamma)
 
         return gamma_new, sig
 
