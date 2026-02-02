@@ -435,7 +435,7 @@ def plot_saved_model(filename: str):
         return
 
     # 4. Testdaten generieren (Baseline Test Set)
-    test_loadcases = [(1.1, 1.0), (1.0, 2.0), (1.0, 3.0)]
+    test_loadcases = [(1.0, 1.0), (1.0, 2.0), (1.0, 3.0)]
     As = [lc[0] for lc in test_loadcases]
     omegas = [lc[1] for lc in test_loadcases]
     
