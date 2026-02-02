@@ -46,57 +46,37 @@ class SimulationResult:
 # Core simulation (crucial building block)
 # ============================================================================
 
-def simulate_model(model: Any, eps: np.ndarray, dts: np.ndarray) -> SimulationResult:
-    """
-    Simulate a model while recording gamma and sigma.
-
-    This is more informative than calling model((eps, dts)) because it exposes
-    internal state gamma for all model types.
-
-    Assumes:
-    - model has attribute `cell`
-    - cell signature: cell(gamma, x) -> (gamma_new, sig)
-    - x is a 2-vector: [eps_n, dt_n]
-    """
+def simulate_model(model, eps, x2):
     eps_j = jnp.asarray(eps)
-    dts_j = jnp.asarray(dts)
+    x2_j  = jnp.asarray(x2)
+    xs = jnp.stack([eps_j, x2_j], axis=1)  # (T,2)
 
-    xs = jnp.stack([eps_j, dts_j], axis=1)  # (T, 2)
+    def scan_fn(state, x):
+        return model.cell(state, x)
 
-    def scan_fn(gamma, x):
+    init_state = jnp.array(0.0)
+    _, ys = jax.lax.scan(scan_fn, init_state, xs)
+
+    # For your models, ys is sigma history (T,) because scan returns (_, y)
+    # But in our previous version we unpacked (gamma_new, sig). Let's do explicit:
+    def scan_fn2(gamma, x):
         gamma_new, sig = model.cell(gamma, x)
         return gamma_new, (gamma_new, sig)
 
-    gamma0 = jnp.array(0.0)
-    gammaT, (gamma_hist, sig_hist) = jax.lax.scan(scan_fn, gamma0, xs)
+    _, (gamma_hist, sig_hist) = jax.lax.scan(scan_fn2, init_state, xs)
+    gamma_full = jnp.concatenate([init_state[None], gamma_hist], axis=0)
 
-    # gamma_hist is (T,) with gamma_{n+1}. We prepend gamma0 to get (T+1,)
-    gamma_full = jnp.concatenate([gamma0[None], gamma_hist], axis=0)
-
-    return SimulationResult(
-        gamma=np.array(gamma_full),
-        sig=np.array(sig_hist),
-    )
+    return gamma_full, sig_hist
 
 
-def simulate_model_batch(model: Any, eps_batch: np.ndarray, dts_batch: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Batch simulation over loadcases.
+def simulate_model_batch(model, eps_batch, x2_batch):
+    def _one(eps, x2):
+        return simulate_model(model, eps, x2)
 
-    Args:
-        eps_batch: (N, T)
-        dts_batch: (N, T)
-
-    Returns:
-        gamma_batch: (N, T+1)
-        sig_batch:   (N, T)
-    """
-    def _one(eps, dts):
-        out = simulate_model(model, eps, dts)
-        return out.gamma, out.sig
-
-    gamma_b, sig_b = jax.vmap(_one)(eps_batch, dts_batch)
+    gamma_b, sig_b = jax.vmap(_one)(eps_batch, x2_batch)
     return np.array(gamma_b), np.array(sig_b)
+
+
 
 
 # ============================================================================
