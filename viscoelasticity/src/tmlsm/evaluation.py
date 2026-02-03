@@ -261,46 +261,108 @@ def gsm_dissipation_density(model: Any, eps: np.ndarray, gamma: np.ndarray) -> n
 # Plotting helpers (modular)
 # ============================================================================
 
+from typing import Dict, Optional, Sequence, Union
+import numpy as np
+import matplotlib.pyplot as plt
+
+
 def plot_multi_model_predictions(
     eps_batch: np.ndarray,
     sig_true_batch: np.ndarray,
     sig_pred_by_model: Dict[str, np.ndarray],
-    omegas: list[float],
-    As: list[float],
+    omegas: Sequence[float],
+    As: Sequence[float],
     title: str = "Model comparison",
+    cases: Optional[Union[int, Sequence[int]]] = None,
+    t: Optional[np.ndarray] = None,
 ) -> None:
     """
-    Overlay multiple model predictions + ground truth.
-    Produces two subplots: sigma(t) and sigma(eps) for each loadcase.
+    Plot GT + multiple model predictions, but *one figure per loadcase*.
+
+    Parameters
+    ----------
+    eps_batch : (N,T)
+    sig_true_batch : (N,T)
+    sig_pred_by_model : dict[name -> (N,T)]
+        Each entry must have same shape as sig_true_batch.
+    omegas, As : length N
+        Metadata used in titles.
+    title : str
+        Base title prefix.
+    cases : None | int | list[int]
+        Which loadcases to plot.
+        - None: plot all loadcases (one figure per case)
+        - int: plot that case
+        - list/tuple: plot those cases
+    t : optional np.ndarray (T,)
+        If None, uses linspace(0, 2π, T) (harmonic assumption).
+        If you want true time, pass cumulative sum of dt externally.
     """
+    eps_batch = np.asarray(eps_batch)
+    sig_true_batch = np.asarray(sig_true_batch)
+
     n_cases, T = eps_batch.shape
-    ts = np.linspace(0, 2 * np.pi, T)
 
-    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
-    fig.suptitle(title)
+    # Validate shapes
+    if sig_true_batch.shape != (n_cases, T):
+        raise ValueError(f"sig_true_batch must have shape {(n_cases, T)}, got {sig_true_batch.shape}")
 
-    # sigma vs time
-    ax = axs[0]
-    for i in range(n_cases):
-        ax.plot(ts, sig_true_batch[i], "--", alpha=0.6, label=f"GT ω={omegas[i]}, A={As[i]}")
+    for name, sig_pred in sig_pred_by_model.items():
+        sig_pred = np.asarray(sig_pred)
+        if sig_pred.shape != (n_cases, T):
+            raise ValueError(f"sig_pred_by_model['{name}'] must have shape {(n_cases, T)}, got {sig_pred.shape}")
+
+    # Normalize cases argument
+    if cases is None:
+        case_list = list(range(n_cases))
+    elif isinstance(cases, int):
+        case_list = [cases]
+    else:
+        case_list = list(cases)
+
+    # bounds check
+    for c in case_list:
+        if c < 0 or c >= n_cases:
+            raise IndexError(f"case index {c} out of bounds for N={n_cases}")
+
+    # Time axis
+    if t is None:
+        ts = np.linspace(0, 2 * np.pi, T)
+    else:
+        ts = np.asarray(t)
+        if ts.shape != (T,):
+            raise ValueError(f"t must have shape {(T,)}, got {ts.shape}")
+
+    # Plot one figure per case
+    for i in case_list:
+        fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+        fig.suptitle(f"{title} — case {i} (ω={omegas[i]}, A={As[i]})")
+
+        # sigma vs time
+        ax = axs[0]
+        ax.plot(ts, sig_true_batch[i], "--", alpha=0.8, linewidth=2.0, label="GT")
         for name, sig_pred in sig_pred_by_model.items():
-            ax.plot(ts, sig_pred[i], "-", linewidth=1.5, label=f"{name} (case {i})" if i == 0 else None)
-    ax.set_xlabel("time t")
-    ax.set_ylabel("stress σ")
+            ax.plot(ts, sig_pred[i], "-", linewidth=1.8, label=name)
 
-    # sigma vs eps
-    ax = axs[1]
-    for i in range(n_cases):
-        ax.plot(eps_batch[i], sig_true_batch[i], "--", alpha=0.6)
-        for _, sig_pred in sig_pred_by_model.items():
-            ax.plot(eps_batch[i], sig_pred[i], "-", linewidth=1.5)
-    ax.set_xlabel("strain ε")
-    ax.set_ylabel("stress σ")
+        ax.set_xlabel("time t")
+        ax.set_ylabel("stress σ")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=9)
 
-    # legend only once (can get large)
-    axs[0].legend(fontsize=8, ncol=2)
-    fig.tight_layout()
-    plt.show()
+        # sigma vs eps (hysteresis)
+        ax = axs[1]
+        ax.plot(eps_batch[i], sig_true_batch[i], "--", alpha=0.8, linewidth=2.0, label="GT")
+        for name, sig_pred in sig_pred_by_model.items():
+            ax.plot(eps_batch[i], sig_pred[i], "-", linewidth=1.8, label=name)
+
+        ax.set_xlabel("strain ε")
+        ax.set_ylabel("stress σ")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=9)
+
+        fig.tight_layout()
+        plt.show()
+
 
 
 def plot_error_vs_time(
@@ -382,6 +444,7 @@ def plot_energy_and_dissipation(
         ax.plot(ts, e, label=name)
     ax.set_xlabel("time t")
     ax.set_ylabel("energy e")
+    ax.set_yscale("log")
     ax.legend(fontsize=8)
 
     ax = axs[1]
@@ -389,6 +452,7 @@ def plot_energy_and_dissipation(
         ax.plot(ts, d, label=name)
     ax.set_xlabel("time t")
     ax.set_ylabel("dissipation density D")
+    ax.set_yscale("log")
     ax.legend(fontsize=8)
 
     fig.tight_layout()

@@ -220,7 +220,7 @@ class GSMCell(eqx.Module):
         self.activations = (
             jax.nn.softplus,
             jax.nn.softplus,
-            lambda x: x,
+            jax.nn.softplus,
         )
         self.g = g
 
