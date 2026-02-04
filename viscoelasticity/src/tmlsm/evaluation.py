@@ -18,7 +18,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from matplotlib import pyplot as plt
-
 from . import metrics as tm_metrics
 
 
@@ -457,3 +456,38 @@ def plot_energy_and_dissipation(
 
     fig.tight_layout()
     plt.show()
+
+def maxwell_nn_coeff_series(model_mnn, eps: np.ndarray, dts: np.ndarray):
+    """
+    Compute f_theta(t) along a trajectory by scanning the internal state gamma.
+
+    Parameters
+    ----------
+    model_mnn : MaxwellNNModel (or any object with .cell.f_theta and .cell(...) )
+    eps : (T,)
+    dts : (T,)
+
+    Returns
+    -------
+    gamma_full : (T+1,)  includes gamma_0 at index 0
+    sig_hist   : (T,)
+    f_hist     : (T,)    f_theta evaluated at (eps_n, gamma_n)
+    """
+    eps_j = jnp.asarray(eps)
+    dts_j = jnp.asarray(dts)
+    xs = jnp.stack([eps_j, dts_j], axis=1)  # (T,2)
+
+    def scan_fn(gamma, x):
+        eps_n = x[0]
+        dt_n = x[1]
+
+        f = model_mnn.cell.f_theta(eps_n, gamma)      # f at (eps_n, gamma_n)
+        gamma_new, sig = model_mnn.cell(gamma, x)     # uses same update
+        return gamma_new, (gamma_new, sig, f)
+
+    gamma0 = jnp.array(0.0)
+    _, (gamma_hist, sig_hist, f_hist) = jax.lax.scan(scan_fn, gamma0, xs)
+
+    gamma_full = jnp.concatenate([gamma0[None], gamma_hist], axis=0)
+
+    return np.array(gamma_full), np.array(sig_hist), np.array(f_hist)

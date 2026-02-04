@@ -150,24 +150,26 @@ class MaxwellNNCell(eqx.Module):
         self.E_infty = E_infty
         self.E_val = E_val
 
+    # Helper to return FFNN outputs for evaluation
+    def f_theta(self, eps, gamma):
+        """Compute f(eps, gamma) > 0 (FFNN output)."""
+        x = jnp.array([eps, gamma])
+        for layer, activation in zip(self.layers, self.activations):
+            x = activation(layer(x))
+        return x[0]
+
     def __call__(self, gamma, x):
         eps = x[0]
         dt = x[1]
 
-        # FFNN: f(eps, gamma) > 0
-        inp = jnp.array([eps, gamma])
-        for layer, activation in zip(self.layers, self.activations):
-            inp = activation(layer(inp))
-        f = inp[0]
+        f = self.f_theta(eps, gamma)
 
-        # Evolution equation (explicit Euler)
         gamma_dot = f * (eps - gamma)
         gamma_new = gamma + dt * gamma_dot
 
-        # Stress (analytical)
         sig = self.E_infty * eps + self.E_val * (eps - gamma)
-
         return gamma_new, sig
+
 
 
 class MaxwellNNModel(eqx.Module):
