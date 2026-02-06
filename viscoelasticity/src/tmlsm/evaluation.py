@@ -491,3 +491,235 @@ def maxwell_nn_coeff_series(model_mnn, eps: np.ndarray, dts: np.ndarray):
     gamma_full = jnp.concatenate([gamma0[None], gamma_hist], axis=0)
 
     return np.array(gamma_full), np.array(sig_hist), np.array(f_hist)
+
+
+
+################################### NEW Section #################################################
+
+# ============================================================================
+# Energy plots vs state (epsilon / gamma) + time reconstruction
+# ============================================================================
+
+from typing import Literal, Sequence, Optional
+
+
+def time_from_dts(dts: np.ndarray, t0: float = 0.0) -> np.ndarray:
+    """
+    Reconstruct time axis from per-step dt.
+
+    Parameters
+    ----------
+    dts : (T,)
+        Time step sizes for each increment.
+    t0 : float
+        Initial time value.
+
+    Returns
+    -------
+    ts : (T,)
+        Time values aligned with eps[t], sigma[t], energy[t] (i.e., per step).
+        We return ts as the "left" time at each step: ts[0]=t0, ts[k]=t0+sum_{i<k} dts[i].
+    """
+    dts = np.asarray(dts).reshape(-1)
+    ts = np.empty_like(dts, dtype=float)
+    t = float(t0)
+    for k in range(len(dts)):
+        ts[k] = t
+        t += float(dts[k])
+    return ts
+
+
+def _prep_energy_state_xy(
+    eps: np.ndarray,
+    gamma: np.ndarray,
+    e: np.ndarray,
+    x_axis: Literal["eps", "gamma"],
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Internal: align shapes and pick x-axis.
+    eps: (T,)
+    gamma: (T+1,) or (T,)  -> we use gamma[:T]
+    e: (T,)
+    """
+    eps = np.asarray(eps).reshape(-1)
+    e = np.asarray(e).reshape(-1)
+    if e.shape[0] != eps.shape[0]:
+        raise ValueError(f"Energy length {e.shape[0]} must match eps length {eps.shape[0]}.")
+
+    gamma = np.asarray(gamma).reshape(-1)
+    if gamma.shape[0] == eps.shape[0] + 1:
+        gT = gamma[: eps.shape[0]]
+    elif gamma.shape[0] == eps.shape[0]:
+        gT = gamma
+    else:
+        raise ValueError(
+            f"gamma must have length T or T+1 (got {gamma.shape[0]} vs T={eps.shape[0]})."
+        )
+
+    x = eps if x_axis == "eps" else gT
+    return x, e
+
+
+def plot_energy_vs_state(
+    eps: np.ndarray,
+    gamma: np.ndarray,
+    energy_by_model: Dict[str, np.ndarray],
+    *,
+    x_axis: Literal["eps", "gamma"] = "eps",
+    mode: Literal["line_time_order", "scatter_time_colored"] = "line_time_order",
+    dts: Optional[np.ndarray] = None,
+    title: str = "Energy vs state",
+    yscale: Optional[Literal["linear", "log"]] = "log",
+    center_energy: bool = False,
+) -> None:
+    """
+    Plot energy vs epsilon or vs gamma.
+
+    Notes
+    -----
+    - Harmonic loading makes e(eps) multi-valued (loading/unloading branches).
+      Use `mode="line_time_order"` (default) to preserve the trajectory loop,
+      or `mode="scatter_time_colored"` to show the multivalued structure.
+    - `center_energy=True` subtracts the mean energy of each curve (useful if
+      the learned energy has an arbitrary additive offset).
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+    ax.set_title(title)
+
+    # time array only needed for scatter coloring
+    ts = None
+    if mode == "scatter_time_colored":
+        if dts is not None:
+            ts = time_from_dts(dts)
+        else:
+            # fall back: index-based time
+            # (still fine for coloring; preserves ordering)
+            ts = np.arange(len(eps), dtype=float)
+
+    # plot each model curve
+    for name, e in energy_by_model.items():
+        x, y = _prep_energy_state_xy(eps, gamma, e, x_axis=x_axis)
+        if center_energy:
+            y = y - np.mean(y)
+
+        if mode == "line_time_order":
+            ax.plot(x, y, label=name)
+        elif mode == "scatter_time_colored":
+            sc = ax.scatter(x, y, c=ts, s=10, alpha=0.7, label=name)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+    ax.set_xlabel("strain ε" if x_axis == "eps" else "internal variable γ")
+    ax.set_ylabel("energy e" + (" (centered)" if center_energy else ""))
+
+    if yscale is not None:
+        ax.set_yscale(yscale)
+
+    ax.legend(fontsize=8)
+
+    if mode == "scatter_time_colored":
+        # colorbar from the last scatter; OK for quick diagnostics
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label("time / step")
+
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_energy_vs_eps_and_gamma(
+    eps: np.ndarray,
+    gamma: np.ndarray,
+    energy_by_model: Dict[str, np.ndarray],
+    *,
+    dts: Optional[np.ndarray] = None,
+    mode: Literal["line_time_order", "scatter_time_colored"] = "line_time_order",
+    title_prefix: str = "Energy",
+    yscale: Optional[Literal["linear", "log"]] = "log",
+    center_energy: bool = False,
+) -> None:
+    """
+    Convenience wrapper: makes 2 plots
+      1) e vs eps
+      2) e vs gamma
+    """
+    plot_energy_vs_state(
+        eps,
+        gamma,
+        energy_by_model,
+        x_axis="eps",
+        mode=mode,
+        dts=dts,
+        title=f"{title_prefix} vs ε",
+        yscale=yscale,
+        center_energy=center_energy,
+    )
+
+    plot_energy_vs_state(
+        eps,
+        gamma,
+        energy_by_model,
+        x_axis="gamma",
+        mode=mode,
+        dts=dts,
+        title=f"{title_prefix} vs γ",
+        yscale=yscale,
+        center_energy=center_energy,
+    )
+
+
+def plot_energy_vs_state_loadcases(
+    eps_batch: np.ndarray,
+    dts_batch: Optional[np.ndarray],
+    gamma_batch: np.ndarray,
+    energy_true_batch: np.ndarray,
+    energy_pred_batch: np.ndarray,
+    *,
+    loadcase_labels: Optional[Sequence[str]] = None,
+    which: Sequence[int] = (0,),
+    mode: Literal["line_time_order", "scatter_time_colored"] = "line_time_order",
+    yscale: Optional[Literal["linear", "log"]] = "log",
+    center_energy: bool = False,
+) -> None:
+    """
+    Plot energy vs eps/gamma for multiple loadcases.
+
+    Parameters
+    ----------
+    eps_batch : (N,T)
+    dts_batch : (N,T) or None
+    gamma_batch : (N,T+1) or (N,T)
+    energy_true_batch : (N,T)
+    energy_pred_batch : (N,T)
+    loadcase_labels : list of strings (len N) like "A=..., ω=..."
+    which : subset of loadcase indices to plot
+    """
+    eps_batch = np.asarray(eps_batch)
+    gamma_batch = np.asarray(gamma_batch)
+    energy_true_batch = np.asarray(energy_true_batch)
+    energy_pred_batch = np.asarray(energy_pred_batch)
+
+    for i in which:
+        label = f"case {i}"
+        if loadcase_labels is not None and i < len(loadcase_labels):
+            label = loadcase_labels[i]
+
+        dts_i = None
+        if dts_batch is not None:
+            dts_i = np.asarray(dts_batch)[i]
+
+        eps_i = eps_batch[i]
+        gamma_i = gamma_batch[i]
+
+        e_true_i = energy_true_batch[i]
+        e_pred_i = energy_pred_batch[i]
+
+        plot_energy_vs_eps_and_gamma(
+            eps_i,
+            gamma_i,
+            {"True": e_true_i, "gsm": e_pred_i},
+            dts=dts_i,
+            mode=mode,
+            title_prefix=f"Energy ({label})",
+            yscale=yscale,
+            center_energy=center_energy,
+        )
