@@ -431,7 +431,7 @@ def find_latest(pattern: str, steps=None, search_dirs=None) -> str:
     Args:
         pattern: Substring to match in filenames (e.g. "omega_3", "gsm__amp_4__seed_0")
         steps: Optional filter for training steps (e.g. 50000, 100000, 250000)
-        search_dirs: List of directories to search. Default: ["artifacts", "artifacts/gsm_experiments"]
+        search_dirs: List of directories to search. Default: all known artifact dirs
 
     Returns:
         Path to the latest matching .eqx file (sorted by timestamp in filename)
@@ -439,7 +439,7 @@ def find_latest(pattern: str, steps=None, search_dirs=None) -> str:
     from pathlib import Path
 
     if search_dirs is None:
-        search_dirs = ["artifacts", "artifacts/gsm_experiments"]
+        search_dirs = ["artifacts", "artifacts/gsm_experiments", "artifacts/rnn_experiments"]
 
     matches = []
     for d in search_dirs:
@@ -497,8 +497,8 @@ def plot_latest(pattern: str, steps=None, test_loadcases=None, search_dirs=None,
 
 
 # Best seeds per config (from visual inspection of all_seeds plots)
-BEST_SEEDS = {
-    "omega_1": 0,  # placeholder – update after inspection
+BEST_SEEDS_GSM = {
+    "omega_1": 0,
     "omega_2": 2,
     "omega_3": 0,
     "omega_4": 1,
@@ -509,28 +509,60 @@ BEST_SEEDS = {
     "mixed_4": 1,
 }
 
+BEST_SEEDS_RNN = {
+    "omega_1": 3,
+    "omega_2": 0,
+    "omega_3": 2,
+    "omega_4": 1,
+    "amp_2":   1,  # alle seeds schlecht
+    "amp_3":   0,  # nicht sehr gut
+    "amp_4":   0,
+    "mixed_2": 0,
+    "mixed_4": 4,
+}
+
+# Default search dirs per model type
+_SEARCH_DIRS = {
+    "gsm":        ["artifacts", "artifacts/gsm_experiments"],
+    "simple_rnn": ["artifacts", "artifacts/rnn_experiments"],
+}
+
+def _get_best_seeds(model_type="gsm"):
+    if model_type == "simple_rnn":
+        return BEST_SEEDS_RNN
+    return BEST_SEEDS_GSM
+
+def _get_search_dirs(model_type="gsm", search_dirs=None):
+    if search_dirs is not None:
+        return search_dirs
+    return _SEARCH_DIRS.get(model_type, ["artifacts"])
+
 
 def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
-              noise_std_rel=0.0):
+              noise_std_rel=0.0, model_type="gsm"):
     """Plot best seed of each config overlaid in one figure for comparison.
 
     All configs are shown in the same plot with different colors.
     Ground truth is black dashed.
 
     Args:
-        configs: List of config names or None for all configs in BEST_SEEDS
+        configs: List of config names or None for all configs
         steps: Training steps filter (default: 250000)
         test_loadcases: List of (A, omega) tuples. Default: [(1,1)]
         search_dirs: Optional list of directories to search
         noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
+        model_type: "gsm" or "simple_rnn" (selects best seeds + search dirs)
 
     Examples:
-        plot_best()                                          # all configs, best seeds
-        plot_best(["omega_2", "omega_4"])                    # only these two
-        plot_best(noise_std_rel=0.02)                        # with 2% noise on eps
+        plot_best()                                          # GSM best seeds
+        plot_best(model_type="simple_rnn")                   # RNN best seeds
+        plot_best(["omega_2", "omega_4"], model_type="simple_rnn")
     """
+    best_seeds = _get_best_seeds(model_type)
+    search_dirs = _get_search_dirs(model_type, search_dirs)
+
     if configs is None:
-        configs = list(BEST_SEEDS.keys())
+        configs = list(best_seeds.keys())
     if test_loadcases is None:
         test_loadcases = [(1.0, 1.0)]
 
@@ -540,7 +572,7 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
     # Collect model files
     model_files = []
     for config in configs:
-        seed = BEST_SEEDS.get(config)
+        seed = best_seeds.get(config)
         if seed is None:
             print(f"Kein best seed definiert für '{config}', überspringe...")
             continue
@@ -553,14 +585,14 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
         print("Keine Modelle gefunden.")
         return
 
-    # Parse n_timesteps and model_type from first file
+    # Parse n_timesteps and file_model_type from first file
     name_only = str(model_files[0][2]).split("/")[-1].split("\\")[-1]
     parts = name_only.replace(".eqx", "").split("__")
     if len(parts) == 6:
-        model_type = parts[0]
+        file_model_type = parts[0]
         n_timesteps = int(parts[4].replace("ts", ""))
     elif len(parts) == 5:
-        model_type = parts[0]
+        file_model_type = parts[0]
         n_timesteps = int(parts[3].replace("ts", ""))
     else:
         print(f"Unbekanntes Format: {name_only}")
@@ -568,15 +600,15 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
 
     # Build model template
     key = jrandom.PRNGKey(0)
-    if model_type == "gsm":
+    if file_model_type == "gsm":
         model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
-    elif model_type == "simple_rnn":
+    elif file_model_type == "simple_rnn":
         model_template = tm.build(key=key)
-    elif model_type == "maxwell_nn":
+    elif file_model_type == "maxwell_nn":
         model_template = tm.build_maxwell_nn(
             key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
     else:
-        print(f"Unbekannter Modelltyp: {model_type}")
+        print(f"Unbekannter Modelltyp: {file_model_type}")
         return
 
     # Generate test data
@@ -591,10 +623,11 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
     # Title
     tc_str = ", ".join([f"(A={a},ω={w})" for a, w in test_loadcases])
     noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
+    model_label = MODEL_LABELS.get(file_model_type, file_model_type.upper())
 
     # --- Harmonic Plot ---
     fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"GSM Best Seeds Comparison — Harmonic — Test: {tc_str}{noise_str}", fontsize=11)
+    fig.suptitle(f"{model_label} Best Seeds Comparison — Harmonic — Test: {tc_str}{noise_str}", fontsize=11)
 
     for i in range(n_lc):
         lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
@@ -622,7 +655,7 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
 
     # --- Relaxation Plot ---
     fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"GSM Best Seeds Comparison — Relaxation — Test: {tc_str}{noise_str}", fontsize=11)
+    fig.suptitle(f"{model_label} Best Seeds Comparison — Relaxation — Test: {tc_str}{noise_str}", fontsize=11)
 
     for i in range(n_lc):
         lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
@@ -651,11 +684,11 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
 
 def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
                   test_type="harmonic", log=False, normalize=False, noise_std_rel=0.0,
-                  search_dirs=None):
+                  search_dirs=None, model_type="gsm"):
     """Plot RMSE heatmaps for each config's best seed over a grid of (A, omega) test cases.
 
     Args:
-        configs: List of config names or None for all in BEST_SEEDS
+        configs: List of config names or None for all in BEST_SEEDS_{GSM/RNN}
         steps: Training steps filter (default: 250000)
         test_omegas: List of omega values for the grid. Default: range(1,21)
         test_As: List of A values for the grid. Default: range(1,21)
@@ -664,6 +697,7 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         normalize: If True, use NRMSE (RMSE / std(sigma_true)) instead of RMSE
         noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
         search_dirs: Optional list of directories to search
+        model_type: "gsm" or "simple_rnn" (selects best seeds + search dirs)
 
     Examples:
         plot_heatmaps()
@@ -672,11 +706,15 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         plot_heatmaps(normalize=True, log=True)
         plot_heatmaps(noise_std_rel=0.02)
         plot_heatmaps(test_omegas=range(1,11), test_As=range(1,11))
+        plot_heatmaps(model_type="simple_rnn")
     """
     from matplotlib.colors import LogNorm
 
+    best_seeds = _get_best_seeds(model_type)
+    search_dirs = _get_search_dirs(model_type, search_dirs)
+
     if configs is None:
-        configs = list(BEST_SEEDS.keys())
+        configs = list(best_seeds.keys())
     if test_omegas is None:
         test_omegas = list(range(1, 21))
     if test_As is None:
@@ -685,7 +723,7 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
     # Collect model files
     model_files = []
     for config in configs:
-        seed = BEST_SEEDS.get(config)
+        seed = best_seeds.get(config)
         if seed is None:
             print(f"Kein best seed definiert für '{config}', überspringe...")
             continue
@@ -698,14 +736,14 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         print("Keine Modelle gefunden.")
         return
 
-    # Parse n_timesteps and model_type from first file
+    # Parse n_timesteps and file_model_type from first file
     name_only = str(model_files[0][2]).split("/")[-1].split("\\")[-1]
     parts = name_only.replace(".eqx", "").split("__")
     if len(parts) == 6:
-        model_type = parts[0]
+        file_model_type = parts[0]
         n_timesteps = int(parts[4].replace("ts", ""))
     elif len(parts) == 5:
-        model_type = parts[0]
+        file_model_type = parts[0]
         n_timesteps = int(parts[3].replace("ts", ""))
     else:
         print(f"Unbekanntes Format: {name_only}")
@@ -713,15 +751,15 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
 
     # Build model template
     key = jrandom.PRNGKey(0)
-    if model_type == "gsm":
+    if file_model_type == "gsm":
         model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
-    elif model_type == "simple_rnn":
+    elif file_model_type == "simple_rnn":
         model_template = tm.build(key=key)
-    elif model_type == "maxwell_nn":
+    elif file_model_type == "maxwell_nn":
         model_template = tm.build_maxwell_nn(
             key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
     else:
-        print(f"Unbekannter Modelltyp: {model_type}")
+        print(f"Unbekannter Modelltyp: {file_model_type}")
         return
 
     n_om = len(test_omegas)
@@ -753,7 +791,8 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
                   width_ratios=[1] * n_cols + [0.05], wspace=0.3, hspace=0.35)
     metric_name = "NRMSE" if normalize else "RMSE"
     noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
-    fig.suptitle(f"{metric_name} Heatmaps ({test_type}) — {steps//1000}k steps{noise_str}", fontsize=13, y=0.98)
+    model_label = MODEL_LABELS.get(file_model_type, file_model_type.upper())
+    fig.suptitle(f"{model_label} — {metric_name} Heatmaps ({test_type}) — {steps//1000}k steps{noise_str}", fontsize=13, y=0.98)
 
     axes = [[fig.add_subplot(gs[r, c]) for c in range(n_cols)] for r in range(n_rows)]
     cbar_ax = fig.add_subplot(gs[:, -1])
