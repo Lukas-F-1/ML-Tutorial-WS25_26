@@ -93,12 +93,15 @@ def plot_data(eps, eps_dot, sig, omegas, As):
     plt.show()
 
 
-def plot_model_pred(eps, sig, sig_m, omegas, As):
+def plot_model_pred(eps, sig, sig_m, omegas, As, title=None):
     n = len(eps[0])
     ns = np.linspace(0, 2 * np.pi, n)
 
     fig, axs = plt.subplots(1, 2, figsize=(10, 4))
-    fig.suptitle("Data: dashed line, model prediction: continuous line")
+    if title:
+        fig.suptitle(title, fontsize=11)
+    else:
+        fig.suptitle("Data: dashed line, model prediction: continuous line")
 
     ax = axs[0]
     for i in range(len(eps)):
@@ -393,11 +396,73 @@ def print_results_table(
 # Single Model Plotting
 # =============================================================================
 
-def plot_saved_model(filename: str):
+def find_latest(pattern: str, steps=None, search_dirs=None) -> str:
+    """Find the latest .eqx file matching a pattern.
+
+    Args:
+        pattern: Substring to match in filenames (e.g. "omega_3", "gsm__amp_4__seed_0")
+        steps: Optional filter for training steps (e.g. 50000, 100000, 250000)
+        search_dirs: List of directories to search. Default: ["artifacts", "artifacts/gsm_experiments"]
+
+    Returns:
+        Path to the latest matching .eqx file (sorted by timestamp in filename)
+    """
+    from pathlib import Path
+
+    if search_dirs is None:
+        search_dirs = ["artifacts", "artifacts/gsm_experiments"]
+
+    matches = []
+    for d in search_dirs:
+        p = Path(d)
+        if p.exists():
+            matches.extend([f for f in p.glob("*.eqx") if pattern in f.name])
+
+    # Filter nach steps falls angegeben
+    if steps is not None:
+        steps_str = f"{steps}steps"
+        matches = [f for f in matches if steps_str in f.name]
+
+    if not matches:
+        info = f"Pattern='{pattern}'"
+        if steps is not None:
+            info += f", steps={steps}"
+        print(f"Keine .eqx Dateien gefunden mit {info}")
+        print(f"Durchsuchte Ordner: {search_dirs}")
+        return None
+
+    # Sortiere nach Dateiname (Timestamp ist am Ende → lexikographisch sortierbar)
+    matches.sort(key=lambda f: f.name)
+    latest = matches[-1]
+    print(f"Gefunden: {latest}")
+    return str(latest)
+
+
+def plot_latest(pattern: str, steps=None, test_loadcases=None, search_dirs=None):
+    """Find the latest model matching a pattern and plot it.
+
+    Args:
+        pattern: Substring to match (e.g. "omega_3", "amp_4__seed_0", "maxwell_nn")
+        steps: Optional filter for training steps (e.g. 50000, 150000, 250000)
+        test_loadcases: List of (A, omega) tuples to test on. Default: [(1,1), (1,2), (1,3)]
+        search_dirs: Optional list of directories to search
+
+    Examples:
+        plot_latest("omega_3")                    # latest omega_3 (any seed, 250k)
+        plot_latest("omega_3__seed_0", steps=50000)  # omega_3 seed 0 at 50k checkpoint
+        plot_latest("omega_3", test_loadcases=[(2,4), (3,1)])  # custom test cases
+    """
+    filename = find_latest(pattern, steps=steps, search_dirs=search_dirs)
+    if filename is not None:
+        plot_saved_model(filename, test_loadcases=test_loadcases)
+
+
+def plot_saved_model(filename: str, test_loadcases=None):
     """Load and plot predictions for a saved model file.
-    
+
     Args:
         filename: Path to the .eqx model file (relative or absolute)
+        test_loadcases: List of (A, omega) tuples. Default: [(1,1), (1,2), (1,3)]
     """
     # 1. Metadaten aus Dateinamen extrahieren
     #    Altes Format (5 Teile): {model}__{experiment}__{steps}steps__{n}ts__{timestamp}.eqx
@@ -410,15 +475,37 @@ def plot_saved_model(filename: str):
         if len(parts) == 5:
             model_type = parts[0]
             experiment_name = parts[1]
+            seed_str = ""
+            train_steps = int(parts[2].replace("steps", ""))
             n_timesteps = int(parts[3].replace("ts", ""))
         elif len(parts) == 6:
             model_type = parts[0]
             experiment_name = parts[1]
+            seed_str = parts[2]  # e.g. "seed_0"
+            train_steps = int(parts[3].replace("steps", ""))
             n_timesteps = int(parts[4].replace("ts", ""))
         else:
             raise ValueError(f"Unbekanntes Format ({len(parts)} Teile): {name_only}")
 
-        print(f"Lade Modell: {model_type} (Trainiert auf: {experiment_name})")
+        # Lesbaren Titel bauen
+        # Trainings-Konfigurationen aus experiment_name ableiten
+        _TRAIN_INFO = {
+            "omega_1": "Train: (A=1,ω=1)",
+            "omega_2": "Train: (A=1,ω=1), (A=1,ω=2)",
+            "omega_3": "Train: (A=1,ω=1..3)",
+            "omega_4": "Train: (A=1,ω=1..4)",
+            "amp_2":   "Train: (ω=1,A=1), (ω=1,A=2)",
+            "amp_3":   "Train: (ω=1,A=1..3)",
+            "amp_4":   "Train: (ω=1,A=1..4)",
+            "mixed_4": "Train: (ω,A)∈{1,4}×{1,4}",
+            "mixed_2": "Train: (ω,A)∈{1,2}×{1,2}",
+        }
+        train_info = _TRAIN_INFO.get(experiment_name, f"Train: {experiment_name}")
+        steps_info = f"{train_steps//1000}k steps"
+        seed_info = f", {seed_str}" if seed_str else ""
+        model_title = f"{model_type.upper()} | {train_info} | {steps_info}{seed_info}"
+
+        print(f"Lade Modell: {model_title}")
     except (ValueError, IndexError) as e:
         print(f"Konnte Metadaten nicht aus Dateinamen lesen: {e}")
         return
@@ -447,8 +534,9 @@ def plot_saved_model(filename: str):
         print(f"Datei nicht gefunden: {filename}")
         return
 
-    # 4. Testdaten generieren (Baseline Test Set)
-    test_loadcases = [(1.0, 1.0), (1.0, 2.0), (1.0, 3.0)]
+    # 4. Testdaten generieren
+    if test_loadcases is None:
+        test_loadcases = [(1.0, 1.0), (1.0, 2.0), (1.0, 3.0)]
     As = [lc[0] for lc in test_loadcases]
     omegas = [lc[1] for lc in test_loadcases]
     
@@ -458,13 +546,14 @@ def plot_saved_model(filename: str):
         MATERIAL_PARAMS["E_infty"],
         MATERIAL_PARAMS["E"],
         MATERIAL_PARAMS["eta"],
-        n_timesteps, # Wichtig: gleiche Zeitauflösung wie im Training/Dateinamen nutzen
+        n_timesteps,
         omegas,
         As
     )
     # Vorhersage (vmap über Batch-Dimension)
     sig_pred_h = jax.vmap(model)((eps_h, dts_h))
-    plot_model_pred(eps_h, sig_h, sig_pred_h, omegas, As)
+    plot_model_pred(eps_h, sig_h, sig_pred_h, omegas, As,
+                    title=f"{model_title} — Harmonic Test")
 
     # Relaxation Test
     print("Plotte Relaxation Test...")
@@ -478,4 +567,5 @@ def plot_saved_model(filename: str):
     )
     # Vorhersage
     sig_pred_r = jax.vmap(model)((eps_r, dts_r))
-    plot_model_pred(eps_r, sig_r, sig_pred_r, omegas, As)
+    plot_model_pred(eps_r, sig_r, sig_pred_r, omegas, As,
+                    title=f"{model_title} — Relaxation Test")
