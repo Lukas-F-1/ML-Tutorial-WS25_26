@@ -1,0 +1,23 @@
+{
+  "experiments": {
+    "omega_1": "Omega sweep: w={1}, A={1}",
+    "omega_2": "Omega sweep: w={1,2}, A={1,1}",
+    "omega_3": "Omega sweep: w={1,2,3}, A={1,1,1}",
+    "omega_4": "Omega sweep: w={1,2,3,4}, A={1,1,1,1}",
+    "amp_2": "Amplitude sweep: w={1,1}, A={1,2}",
+    "amp_3": "Amplitude sweep: w={1,1,1}, A={1,2,3}",
+    "amp_4": "Amplitude sweep: w={1,1,1,1}, A={1,2,3,4}",
+    "mixed_4": "Mixed 4 (corners): w={1,1,4,4}, A={1,4,1,4}",
+    "mixed_2": "Mixed 2 (moderate): w={1,1,2,2}, A={1,2,1,2}"
+  },
+  "n_seeds": 5,
+  "total_steps": 250000,
+  "checkpoint_every": 50000,
+  "n_timesteps": 100,
+  "material_params": {
+    "E_infty": 0.5,
+    "E": 2.0,
+    "eta": 1.0
+  },
+  "start_time": "2026-02-09T00:18:22.216143"
+}

@@ -15,6 +15,7 @@ from . import storage
 from .configs import MATERIAL_PARAMS
 import jax
 import jax.random as jrandom
+import klax
 
 
 # Colors for loadcases
@@ -399,17 +400,28 @@ def plot_saved_model(filename: str):
         filename: Path to the .eqx model file (relative or absolute)
     """
     # 1. Metadaten aus Dateinamen extrahieren
+    #    Altes Format (5 Teile): {model}__{experiment}__{steps}steps__{n}ts__{timestamp}.eqx
+    #    Neues Format (6 Teile): {model}__{experiment}__seed_{i}__{steps}steps__{n}ts__{timestamp}.eqx
     try:
-        # Erwartet nur den Dateinamen, also pfad entfernen falls vorhanden
         name_only = str(filename).split("/")[-1].split("\\")[-1]
-        metadata = storage.parse_model_filename(name_only)
-        print(f"Lade Modell: {metadata['model_type']} (Trainiert auf: {metadata['experiment_name']})")
-    except ValueError:
-        print("Konnte Metadaten nicht aus Dateinamen lesen. Stelle sicher, dass das Format stimmt.")
-        return
+        name_no_ext = name_only.replace(".eqx", "")
+        parts = name_no_ext.split("__")
 
-    model_type = metadata["model_type"]
-    n_timesteps = metadata["n_timesteps"]
+        if len(parts) == 5:
+            model_type = parts[0]
+            experiment_name = parts[1]
+            n_timesteps = int(parts[3].replace("ts", ""))
+        elif len(parts) == 6:
+            model_type = parts[0]
+            experiment_name = parts[1]
+            n_timesteps = int(parts[4].replace("ts", ""))
+        else:
+            raise ValueError(f"Unbekanntes Format ({len(parts)} Teile): {name_only}")
+
+        print(f"Lade Modell: {model_type} (Trainiert auf: {experiment_name})")
+    except (ValueError, IndexError) as e:
+        print(f"Konnte Metadaten nicht aus Dateinamen lesen: {e}")
+        return
     
     # 2. Modell-Template erstellen (für Equinox Load)
     key = jrandom.PRNGKey(0)
@@ -427,9 +439,10 @@ def plot_saved_model(filename: str):
         print(f"Unbekannter Modelltyp: {model_type}")
         return
 
-    # 3. Modell laden
+    # 3. Modell laden und finalisieren
     try:
         model = storage.load_model(filename, model_template)
+        model = klax.finalize(model)
     except FileNotFoundError:
         print(f"Datei nicht gefunden: {filename}")
         return

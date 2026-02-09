@@ -1,5 +1,5 @@
 # Ignore model files (too large for git)
-*.eqx
+# *.eqx
 
 # Keep JSON results (small, useful for reproducibility)
 !results__*.json
