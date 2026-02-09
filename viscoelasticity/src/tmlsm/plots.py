@@ -393,6 +393,35 @@ def print_results_table(
     print("=" * len(header) + "\n")
 
 # =============================================================================
+# Data Generation Helper
+# =============================================================================
+
+def _generate_test_data(n_timesteps, omegas, As, test_type="harmonic", noise_std_rel=0.0):
+    """Generate test data, optionally with noisy eps.
+
+    Returns: (eps, sig_true, dts)
+    """
+    mp = MATERIAL_PARAMS
+    if test_type == "harmonic":
+        if noise_std_rel > 0:
+            eps, _, sig, dts = td.generate_data_harmonic_noisy_eps(
+                mp["E_infty"], mp["E"], mp["eta"], n_timesteps, omegas, As,
+                noise_std_rel=noise_std_rel, seed=0, recompute_eps_dot_from_noisy=False)
+        else:
+            eps, _, sig, dts = td.generate_data_harmonic(
+                mp["E_infty"], mp["E"], mp["eta"], n_timesteps, omegas, As)
+    else:  # relaxation
+        if noise_std_rel > 0:
+            eps, _, sig, dts = td.generate_data_relaxation_noisy_eps(
+                mp["E_infty"], mp["E"], mp["eta"], n_timesteps, omegas, As,
+                noise_std_rel=noise_std_rel, seed=0, recompute_eps_dot_from_noisy=False)
+        else:
+            eps, _, sig, dts = td.generate_data_relaxation(
+                mp["E_infty"], mp["E"], mp["eta"], n_timesteps, omegas, As)
+    return eps, sig, dts
+
+
+# =============================================================================
 # Single Model Plotting
 # =============================================================================
 
@@ -438,7 +467,8 @@ def find_latest(pattern: str, steps=None, search_dirs=None) -> str:
     return str(latest)
 
 
-def plot_latest(pattern: str, steps=None, test_loadcases=None, search_dirs=None):
+def plot_latest(pattern: str, steps=None, test_loadcases=None, search_dirs=None,
+                seeds=None, noise_std_rel=0.0):
     """Find the latest model matching a pattern and plot it.
 
     Args:
@@ -446,23 +476,516 @@ def plot_latest(pattern: str, steps=None, test_loadcases=None, search_dirs=None)
         steps: Optional filter for training steps (e.g. 50000, 150000, 250000)
         test_loadcases: List of (A, omega) tuples to test on. Default: [(1,1), (1,2), (1,3)]
         search_dirs: Optional list of directories to search
+        seeds: List of seed indices to plot overlaid in one figure (e.g. [0,2,4])
+               Use seeds=[0,1,2,3,4] for all 5 seeds.
+        noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
 
     Examples:
-        plot_latest("omega_3")                    # latest omega_3 (any seed, 250k)
-        plot_latest("omega_3__seed_0", steps=50000)  # omega_3 seed 0 at 50k checkpoint
-        plot_latest("omega_3", test_loadcases=[(2,4), (3,1)])  # custom test cases
+        plot_latest("omega_3__seed_0")                              # single seed
+        plot_latest("omega_3__seed_0", noise_std_rel=0.02)          # with 2% noise
+        plot_latest("omega_3", seeds=[0,1,2,3,4])                   # all 5 seeds overlaid
     """
-    filename = find_latest(pattern, steps=steps, search_dirs=search_dirs)
-    if filename is not None:
-        plot_saved_model(filename, test_loadcases=test_loadcases)
+    if seeds is not None:
+        _plot_all_seeds(pattern, steps=steps, seeds=seeds,
+                        test_loadcases=test_loadcases, search_dirs=search_dirs,
+                        noise_std_rel=noise_std_rel)
+    else:
+        filename = find_latest(pattern, steps=steps, search_dirs=search_dirs)
+        if filename is not None:
+            plot_saved_model(filename, test_loadcases=test_loadcases,
+                            noise_std_rel=noise_std_rel)
 
 
-def plot_saved_model(filename: str, test_loadcases=None):
+# Best seeds per config (from visual inspection of all_seeds plots)
+BEST_SEEDS = {
+    "omega_1": 0,  # placeholder – update after inspection
+    "omega_2": 2,
+    "omega_3": 0,
+    "omega_4": 1,
+    "amp_2":   2,
+    "amp_3":   0,
+    "amp_4":   0,
+    "mixed_2": 4,
+    "mixed_4": 1,
+}
+
+
+def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
+              noise_std_rel=0.0):
+    """Plot best seed of each config overlaid in one figure for comparison.
+
+    All configs are shown in the same plot with different colors.
+    Ground truth is black dashed.
+
+    Args:
+        configs: List of config names or None for all configs in BEST_SEEDS
+        steps: Training steps filter (default: 250000)
+        test_loadcases: List of (A, omega) tuples. Default: [(1,1)]
+        search_dirs: Optional list of directories to search
+        noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
+
+    Examples:
+        plot_best()                                          # all configs, best seeds
+        plot_best(["omega_2", "omega_4"])                    # only these two
+        plot_best(noise_std_rel=0.02)                        # with 2% noise on eps
+    """
+    if configs is None:
+        configs = list(BEST_SEEDS.keys())
+    if test_loadcases is None:
+        test_loadcases = [(1.0, 1.0)]
+
+    As = [lc[0] for lc in test_loadcases]
+    omegas = [lc[1] for lc in test_loadcases]
+
+    # Collect model files
+    model_files = []
+    for config in configs:
+        seed = BEST_SEEDS.get(config)
+        if seed is None:
+            print(f"Kein best seed definiert für '{config}', überspringe...")
+            continue
+        pattern = f"{config}__seed_{seed}"
+        f = find_latest(pattern, steps=steps, search_dirs=search_dirs)
+        if f is not None:
+            model_files.append((config, seed, f))
+
+    if not model_files:
+        print("Keine Modelle gefunden.")
+        return
+
+    # Parse n_timesteps and model_type from first file
+    name_only = str(model_files[0][2]).split("/")[-1].split("\\")[-1]
+    parts = name_only.replace(".eqx", "").split("__")
+    if len(parts) == 6:
+        model_type = parts[0]
+        n_timesteps = int(parts[4].replace("ts", ""))
+    elif len(parts) == 5:
+        model_type = parts[0]
+        n_timesteps = int(parts[3].replace("ts", ""))
+    else:
+        print(f"Unbekanntes Format: {name_only}")
+        return
+
+    # Build model template
+    key = jrandom.PRNGKey(0)
+    if model_type == "gsm":
+        model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
+    elif model_type == "simple_rnn":
+        model_template = tm.build(key=key)
+    elif model_type == "maxwell_nn":
+        model_template = tm.build_maxwell_nn(
+            key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
+    else:
+        print(f"Unbekannter Modelltyp: {model_type}")
+        return
+
+    # Generate test data
+    eps_h, sig_h, dts_h = _generate_test_data(n_timesteps, omegas, As, "harmonic", noise_std_rel)
+    eps_r, sig_r, dts_r = _generate_test_data(n_timesteps, omegas, As, "relaxation", noise_std_rel)
+
+    n_pts = len(eps_h[0])
+    ns = np.linspace(0, 2 * np.pi, n_pts)
+    n_lc = len(test_loadcases)
+    cmap = plt.cm.tab10
+
+    # Title
+    tc_str = ", ".join([f"(A={a},ω={w})" for a, w in test_loadcases])
+    noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
+
+    # --- Harmonic Plot ---
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle(f"GSM Best Seeds Comparison — Harmonic — Test: {tc_str}{noise_str}", fontsize=11)
+
+    for i in range(n_lc):
+        lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
+        axs[0].plot(ns, sig_h[i], linestyle=":", color="black", linewidth=2, label=lbl if i == 0 else None)
+        axs[1].plot(eps_h[i], sig_h[i], linestyle=":", color="black", linewidth=2)
+
+    for idx, (config, seed, filepath) in enumerate(model_files):
+        model = storage.load_model(filepath, model_template)
+        model = klax.finalize(model)
+        sig_pred = jax.vmap(model)((eps_h, dts_h))
+        c = cmap(idx % 10)
+        for i in range(n_lc):
+            label = f"{config} (s{seed})" if i == 0 else None
+            axs[0].plot(ns, sig_pred[i], color=c, alpha=0.8, label=label)
+            axs[1].plot(eps_h[i], sig_pred[i], color=c, alpha=0.8)
+
+    axs[0].set_xlim([0, 2 * np.pi])
+    axs[0].set_ylabel("stress $\\sigma$")
+    axs[0].set_xlabel("time $t$")
+    axs[0].legend(fontsize=7, loc="best")
+    axs[1].set_xlabel("strain $\\varepsilon$")
+    axs[1].set_ylabel("stress $\\sigma$")
+    fig.tight_layout()
+    plt.show()
+
+    # --- Relaxation Plot ---
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle(f"GSM Best Seeds Comparison — Relaxation — Test: {tc_str}{noise_str}", fontsize=11)
+
+    for i in range(n_lc):
+        lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
+        axs[0].plot(ns, sig_r[i], linestyle=":", color="black", linewidth=2, label=lbl if i == 0 else None)
+        axs[1].plot(eps_r[i], sig_r[i], linestyle=":", color="black", linewidth=2)
+
+    for idx, (config, seed, filepath) in enumerate(model_files):
+        model = storage.load_model(filepath, model_template)
+        model = klax.finalize(model)
+        sig_pred = jax.vmap(model)((eps_r, dts_r))
+        c = cmap(idx % 10)
+        for i in range(n_lc):
+            label = f"{config} (s{seed})" if i == 0 else None
+            axs[0].plot(ns, sig_pred[i], color=c, alpha=0.8, label=label)
+            axs[1].plot(eps_r[i], sig_pred[i], color=c, alpha=0.8)
+
+    axs[0].set_xlim([0, 2 * np.pi])
+    axs[0].set_ylabel("stress $\\sigma$")
+    axs[0].set_xlabel("time $t$")
+    axs[0].legend(fontsize=7, loc="best")
+    axs[1].set_xlabel("strain $\\varepsilon$")
+    axs[1].set_ylabel("stress $\\sigma$")
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
+                  test_type="harmonic", log=False, normalize=False, noise_std_rel=0.0,
+                  search_dirs=None):
+    """Plot RMSE heatmaps for each config's best seed over a grid of (A, omega) test cases.
+
+    Args:
+        configs: List of config names or None for all in BEST_SEEDS
+        steps: Training steps filter (default: 250000)
+        test_omegas: List of omega values for the grid. Default: range(1,21)
+        test_As: List of A values for the grid. Default: range(1,21)
+        test_type: "harmonic" or "relaxation"
+        log: If True, use logarithmic color scale
+        normalize: If True, use NRMSE (RMSE / std(sigma_true)) instead of RMSE
+        noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
+        search_dirs: Optional list of directories to search
+
+    Examples:
+        plot_heatmaps()
+        plot_heatmaps(["omega_1", "omega_4", "mixed_4"])
+        plot_heatmaps(log=True)
+        plot_heatmaps(normalize=True, log=True)
+        plot_heatmaps(noise_std_rel=0.02)
+        plot_heatmaps(test_omegas=range(1,11), test_As=range(1,11))
+    """
+    from matplotlib.colors import LogNorm
+
+    if configs is None:
+        configs = list(BEST_SEEDS.keys())
+    if test_omegas is None:
+        test_omegas = list(range(1, 21))
+    if test_As is None:
+        test_As = list(range(1, 21))
+
+    # Collect model files
+    model_files = []
+    for config in configs:
+        seed = BEST_SEEDS.get(config)
+        if seed is None:
+            print(f"Kein best seed definiert für '{config}', überspringe...")
+            continue
+        pattern = f"{config}__seed_{seed}"
+        f = find_latest(pattern, steps=steps, search_dirs=search_dirs)
+        if f is not None:
+            model_files.append((config, seed, f))
+
+    if not model_files:
+        print("Keine Modelle gefunden.")
+        return
+
+    # Parse n_timesteps and model_type from first file
+    name_only = str(model_files[0][2]).split("/")[-1].split("\\")[-1]
+    parts = name_only.replace(".eqx", "").split("__")
+    if len(parts) == 6:
+        model_type = parts[0]
+        n_timesteps = int(parts[4].replace("ts", ""))
+    elif len(parts) == 5:
+        model_type = parts[0]
+        n_timesteps = int(parts[3].replace("ts", ""))
+    else:
+        print(f"Unbekanntes Format: {name_only}")
+        return
+
+    # Build model template
+    key = jrandom.PRNGKey(0)
+    if model_type == "gsm":
+        model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
+    elif model_type == "simple_rnn":
+        model_template = tm.build(key=key)
+    elif model_type == "maxwell_nn":
+        model_template = tm.build_maxwell_nn(
+            key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
+    else:
+        print(f"Unbekannter Modelltyp: {model_type}")
+        return
+
+    n_om = len(test_omegas)
+    n_A = len(test_As)
+
+    # Train info for annotations
+    _TRAIN_INFO = {
+        "omega_1": "ω={1}",
+        "omega_2": "ω={1,2}",
+        "omega_3": "ω={1,2,3}",
+        "omega_4": "ω={1,2,3,4}",
+        "amp_2":   "A={1,2}",
+        "amp_3":   "A={1,2,3}",
+        "amp_4":   "A={1,2,3,4}",
+        "mixed_4": "(ω,A)∈{1,4}²",
+        "mixed_2": "(ω,A)∈{1,2}²",
+    }
+
+    # Determine grid layout
+    n_models = len(model_files)
+    n_cols = min(n_models, 3)
+    n_rows = (n_models + n_cols - 1) // n_cols
+
+    # Use GridSpec with extra column for colorbar
+    from matplotlib.gridspec import GridSpec
+    cell_size = 5
+    fig = plt.figure(figsize=(cell_size * n_cols + 2, cell_size * n_rows + 1))
+    gs = GridSpec(n_rows, n_cols + 1, figure=fig,
+                  width_ratios=[1] * n_cols + [0.05], wspace=0.3, hspace=0.35)
+    metric_name = "NRMSE" if normalize else "RMSE"
+    noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
+    fig.suptitle(f"{metric_name} Heatmaps ({test_type}) — {steps//1000}k steps{noise_str}", fontsize=13, y=0.98)
+
+    axes = [[fig.add_subplot(gs[r, c]) for c in range(n_cols)] for r in range(n_rows)]
+    cbar_ax = fig.add_subplot(gs[:, -1])
+
+    # First pass: compute all RMSE values
+    print("Berechne RMSE-Werte...")
+    rmse_per_model = []
+    for config, seed, filepath in model_files:
+        model = storage.load_model(filepath, model_template)
+        model = klax.finalize(model)
+
+        rmse_grid = np.zeros((n_A, n_om))
+        for i, A in enumerate(test_As):
+            for j, omega in enumerate(test_omegas):
+                eps, sig, dts = _generate_test_data(
+                    n_timesteps, [omega], [A], test_type, noise_std_rel)
+                sig_pred = jax.vmap(model)((eps, dts))
+                rmse = float(np.sqrt(np.mean((np.array(sig_pred) - np.array(sig)) ** 2)))
+                if normalize:
+                    sig_std = float(np.std(np.array(sig)))
+                    rmse = rmse / sig_std if sig_std > 1e-10 else rmse
+                rmse_grid[i, j] = rmse
+
+        rmse_per_model.append(rmse_grid)
+        print(f"  {config} (seed {seed}): done")
+
+    # Global color range
+    all_vals = np.concatenate([r.ravel() for r in rmse_per_model])
+    if log:
+        log_floor = max(all_vals[all_vals > 0].min() * 0.1, 1e-6) if np.any(all_vals > 0) else 1e-6
+        norm = LogNorm(vmin=log_floor, vmax=all_vals.max())
+    else:
+        norm = None
+        vmin = 0
+        vmax = all_vals.max()
+
+    # Second pass: plot
+    im = None
+    for idx, (config, seed, filepath) in enumerate(model_files):
+        row, col = idx // n_cols, idx % n_cols
+        ax = axes[row][col]
+        rmse_grid = rmse_per_model[idx]
+
+        if log:
+            plot_data = np.where(rmse_grid > 0, rmse_grid, log_floor)
+            im = ax.imshow(plot_data, origin="lower", aspect="equal",
+                           norm=norm, cmap="RdYlGn_r",
+                           extent=[-0.5, n_om - 0.5, -0.5, n_A - 0.5])
+        else:
+            im = ax.imshow(rmse_grid, origin="lower", aspect="equal",
+                           vmin=vmin, vmax=vmax, cmap="RdYlGn_r",
+                           extent=[-0.5, n_om - 0.5, -0.5, n_A - 0.5])
+
+        # Annotate cells with RMSE values (only if grid is small enough to read)
+        if n_om <= 8 and n_A <= 8:
+            thresh = norm(rmse_grid).data if log else rmse_grid / vmax if vmax > 0 else rmse_grid
+            for i in range(n_A):
+                for j in range(n_om):
+                    val = rmse_grid[i, j]
+                    t = thresh[i, j] if hasattr(thresh, '__getitem__') else 0.5
+                    color = "white" if t > 0.6 else "black"
+                    ax.text(j, i, f"{val:.3f}", ha="center", va="center",
+                            fontsize=7, color=color)
+
+        ax.set_xticks(range(n_om))
+        ax.set_xticklabels(test_omegas, fontsize=6)
+        ax.set_yticks(range(n_A))
+        ax.set_yticklabels(test_As, fontsize=6)
+        ax.set_xlabel("ω (test)")
+        ax.set_ylabel("A (test)")
+
+        train_info = _TRAIN_INFO.get(config, config)
+        ax.set_title(f"{config}\nTrain: {train_info}, seed {seed}", fontsize=9)
+
+    # Hide unused axes
+    for idx in range(n_models, n_rows * n_cols):
+        row, col = idx // n_cols, idx % n_cols
+        axes[row][col].axis("off")
+
+    # Colorbar in its own axis
+    label = f"{metric_name} (log)" if log else metric_name
+    fig.colorbar(im, cax=cbar_ax, label=label)
+    plt.show()
+
+
+def _plot_all_seeds(pattern, steps=None, seeds=None, test_loadcases=None, search_dirs=None,
+                    noise_std_rel=0.0):
+    """Plot selected seeds for a config overlaid in one figure.
+
+    Each seed gets a different color, ground truth is shown as black dashed line.
+    """
+    if seeds is None:
+        seeds = [0, 1, 2, 3, 4]
+    if test_loadcases is None:
+        test_loadcases = [(1.0, 1.0)]
+
+    As = [lc[0] for lc in test_loadcases]
+    omegas = [lc[1] for lc in test_loadcases]
+
+    # Collect filenames for requested seeds
+    seed_files = []
+    for seed in seeds:
+        seed_pattern = f"{pattern}__seed_{seed}"
+        f = find_latest(seed_pattern, steps=steps, search_dirs=search_dirs)
+        if f is not None:
+            seed_files.append((seed, f))
+
+    if not seed_files:
+        print(f"Keine Modelle gefunden für Pattern '{pattern}'")
+        return
+
+    # Parse metadata from first file for title and model template
+    name_only = str(seed_files[0][1]).split("/")[-1].split("\\")[-1]
+    name_no_ext = name_only.replace(".eqx", "")
+    parts = name_no_ext.split("__")
+
+    if len(parts) == 6:
+        model_type, experiment_name = parts[0], parts[1]
+        train_steps = int(parts[3].replace("steps", ""))
+        n_timesteps = int(parts[4].replace("ts", ""))
+    elif len(parts) == 5:
+        model_type, experiment_name = parts[0], parts[1]
+        train_steps = int(parts[2].replace("steps", ""))
+        n_timesteps = int(parts[3].replace("ts", ""))
+    else:
+        print(f"Unbekanntes Dateinamen-Format: {name_only}")
+        return
+
+    # Build model template
+    key = jrandom.PRNGKey(0)
+    if model_type == "simple_rnn":
+        model_template = tm.build(key=key)
+    elif model_type == "maxwell_nn":
+        model_template = tm.build_maxwell_nn(
+            key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
+    elif model_type == "gsm":
+        model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
+    else:
+        print(f"Unbekannter Modelltyp: {model_type}")
+        return
+
+    # Generate test data
+    eps_h, sig_h, dts_h = _generate_test_data(n_timesteps, omegas, As, "harmonic", noise_std_rel)
+    eps_r, sig_r, dts_r = _generate_test_data(n_timesteps, omegas, As, "relaxation", noise_std_rel)
+
+    n_pts = len(eps_h[0])
+    ns = np.linspace(0, 2 * np.pi, n_pts)
+    n_lc = len(test_loadcases)
+
+    # Build title
+    _TRAIN_INFO = {
+        "omega_1": "Train: (A=1,ω=1)",
+        "omega_2": "Train: (A=1,ω=1), (A=1,ω=2)",
+        "omega_3": "Train: (A=1,ω=1..3)",
+        "omega_4": "Train: (A=1,ω=1..4)",
+        "amp_2":   "Train: (ω=1,A=1), (ω=1,A=2)",
+        "amp_3":   "Train: (ω=1,A=1..3)",
+        "amp_4":   "Train: (ω=1,A=1..4)",
+        "mixed_4": "Train: (ω,A)∈{1,4}×{1,4}",
+        "mixed_2": "Train: (ω,A)∈{1,2}×{1,2}",
+    }
+    train_info = _TRAIN_INFO.get(experiment_name, f"Train: {experiment_name}")
+    noise_str = f" [noise={noise_std_rel:.0%}]" if noise_std_rel > 0 else ""
+    base_title = f"{model_type.upper()} | {train_info} | {train_steps//1000}k steps | {len(seed_files)} seeds{noise_str}"
+
+    # Seed colors (colormap)
+    seed_cmap = plt.cm.tab10
+
+    # --- Harmonic Plot ---
+    fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+    fig.suptitle(f"{base_title} — Harmonic Test", fontsize=11)
+
+    for i in range(n_lc):
+        axs[0].plot(ns, sig_h[i], linestyle=":", color="black", linewidth=1.5,
+                    label=f"GT: ω={omegas[i]}, A={As[i]}" if i == 0 or n_lc > 1 else None)
+        axs[1].plot(eps_h[i], sig_h[i], linestyle=":", color="black", linewidth=1.5)
+
+    for seed, filepath in seed_files:
+        model = storage.load_model(filepath, model_template)
+        model = klax.finalize(model)
+        sig_pred = jax.vmap(model)((eps_h, dts_h))
+        c = seed_cmap(seed)
+        for i in range(n_lc):
+            label = f"seed {seed}" if i == 0 else None
+            axs[0].plot(ns, sig_pred[i], color=c, alpha=0.7, label=label)
+            axs[1].plot(eps_h[i], sig_pred[i], color=c, alpha=0.7)
+
+    axs[0].set_xlim([0, 2 * np.pi])
+    axs[0].set_ylabel("stress $\\sigma$")
+    axs[0].set_xlabel("time $t$")
+    axs[0].legend(fontsize=8)
+    axs[1].set_xlabel("strain $\\varepsilon$")
+    axs[1].set_ylabel("stress $\\sigma$")
+    fig.tight_layout()
+    plt.show()
+
+    # --- Relaxation Plot ---
+    fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+    fig.suptitle(f"{base_title} — Relaxation Test", fontsize=11)
+
+    for i in range(n_lc):
+        axs[0].plot(ns, sig_r[i], linestyle=":", color="black", linewidth=1.5,
+                    label=f"GT: ω={omegas[i]}, A={As[i]}" if i == 0 or n_lc > 1 else None)
+        axs[1].plot(eps_r[i], sig_r[i], linestyle=":", color="black", linewidth=1.5)
+
+    for seed, filepath in seed_files:
+        model = storage.load_model(filepath, model_template)
+        model = klax.finalize(model)
+        sig_pred = jax.vmap(model)((eps_r, dts_r))
+        c = seed_cmap(seed)
+        for i in range(n_lc):
+            label = f"seed {seed}" if i == 0 else None
+            axs[0].plot(ns, sig_pred[i], color=c, alpha=0.7, label=label)
+            axs[1].plot(eps_r[i], sig_pred[i], color=c, alpha=0.7)
+
+    axs[0].set_xlim([0, 2 * np.pi])
+    axs[0].set_ylabel("stress $\\sigma$")
+    axs[0].set_xlabel("time $t$")
+    axs[0].legend(fontsize=8)
+    axs[1].set_xlabel("strain $\\varepsilon$")
+    axs[1].set_ylabel("stress $\\sigma$")
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_saved_model(filename: str, test_loadcases=None, noise_std_rel=0.0):
     """Load and plot predictions for a saved model file.
 
     Args:
         filename: Path to the .eqx model file (relative or absolute)
         test_loadcases: List of (A, omega) tuples. Default: [(1,1), (1,2), (1,3)]
+        noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
     """
     # 1. Metadaten aus Dateinamen extrahieren
     #    Altes Format (5 Teile): {model}__{experiment}__{steps}steps__{n}ts__{timestamp}.eqx
@@ -540,32 +1063,18 @@ def plot_saved_model(filename: str, test_loadcases=None):
     As = [lc[0] for lc in test_loadcases]
     omegas = [lc[1] for lc in test_loadcases]
     
+    noise_str = f" [noise={noise_std_rel:.0%}]" if noise_std_rel > 0 else ""
+
     # Harmonic Test
     print("Plotte Harmonic Test...")
-    eps_h, _, sig_h, dts_h = td.generate_data_harmonic(
-        MATERIAL_PARAMS["E_infty"],
-        MATERIAL_PARAMS["E"],
-        MATERIAL_PARAMS["eta"],
-        n_timesteps,
-        omegas,
-        As
-    )
-    # Vorhersage (vmap über Batch-Dimension)
+    eps_h, sig_h, dts_h = _generate_test_data(n_timesteps, omegas, As, "harmonic", noise_std_rel)
     sig_pred_h = jax.vmap(model)((eps_h, dts_h))
     plot_model_pred(eps_h, sig_h, sig_pred_h, omegas, As,
-                    title=f"{model_title} — Harmonic Test")
+                    title=f"{model_title} — Harmonic Test{noise_str}")
 
     # Relaxation Test
     print("Plotte Relaxation Test...")
-    eps_r, _, sig_r, dts_r = td.generate_data_relaxation(
-        MATERIAL_PARAMS["E_infty"],
-        MATERIAL_PARAMS["E"],
-        MATERIAL_PARAMS["eta"],
-        n_timesteps,
-        omegas,
-        As
-    )
-    # Vorhersage
+    eps_r, sig_r, dts_r = _generate_test_data(n_timesteps, omegas, As, "relaxation", noise_std_rel)
     sig_pred_r = jax.vmap(model)((eps_r, dts_r))
     plot_model_pred(eps_r, sig_r, sig_pred_r, omegas, As,
-                    title=f"{model_title} — Relaxation Test")
+                    title=f"{model_title} — Relaxation Test{noise_str}")
