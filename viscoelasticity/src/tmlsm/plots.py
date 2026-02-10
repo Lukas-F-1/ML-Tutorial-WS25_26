@@ -439,7 +439,7 @@ def find_latest(pattern: str, steps=None, search_dirs=None) -> str:
     from pathlib import Path
 
     if search_dirs is None:
-        search_dirs = ["artifacts", "artifacts/gsm_experiments", "artifacts/rnn_experiments"]
+        search_dirs = ["artifacts", "artifacts/gsm_experiments", "artifacts/rnn_experiments", "artifacts/maxwell_nn_experiments"]
 
     matches = []
     for d in search_dirs:
@@ -521,15 +521,30 @@ BEST_SEEDS_RNN = {
     "mixed_4": 4,
 }
 
+BEST_SEEDS_MAXWELL_NN = {
+    "omega_1": 1,
+    "omega_2": 2,
+    "omega_3": 0,
+    "omega_4": 0,
+    "amp_2":   3,
+    "amp_3":   3,
+    "amp_4":   0,
+    "mixed_2": 2,
+    "mixed_4": 3,
+}
+
 # Default search dirs per model type
 _SEARCH_DIRS = {
     "gsm":        ["artifacts", "artifacts/gsm_experiments"],
     "simple_rnn": ["artifacts", "artifacts/rnn_experiments"],
+    "maxwell_nn": ["artifacts", "artifacts/maxwell_nn_experiments"],
 }
 
 def _get_best_seeds(model_type="gsm"):
     if model_type == "simple_rnn":
         return BEST_SEEDS_RNN
+    elif model_type == "maxwell_nn":
+        return BEST_SEEDS_MAXWELL_NN
     return BEST_SEEDS_GSM
 
 def _get_search_dirs(model_type="gsm", search_dirs=None):
@@ -551,11 +566,12 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
         test_loadcases: List of (A, omega) tuples. Default: [(1,1)]
         search_dirs: Optional list of directories to search
         noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
-        model_type: "gsm" or "simple_rnn" (selects best seeds + search dirs)
+        model_type: "gsm", "simple_rnn", or "maxwell_nn" (selects best seeds + search dirs)
 
     Examples:
         plot_best()                                          # GSM best seeds
         plot_best(model_type="simple_rnn")                   # RNN best seeds
+        plot_best(model_type="maxwell_nn")                   # Maxwell NN best seeds
         plot_best(["omega_2", "omega_4"], model_type="simple_rnn")
     """
     best_seeds = _get_best_seeds(model_type)
@@ -697,7 +713,7 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         normalize: If True, use NRMSE (RMSE / std(sigma_true)) instead of RMSE
         noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
         search_dirs: Optional list of directories to search
-        model_type: "gsm" or "simple_rnn" (selects best seeds + search dirs)
+        model_type: "gsm", "simple_rnn", or "maxwell_nn" (selects best seeds + search dirs)
 
     Examples:
         plot_heatmaps()
@@ -707,6 +723,7 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         plot_heatmaps(noise_std_rel=0.02)
         plot_heatmaps(test_omegas=range(1,11), test_As=range(1,11))
         plot_heatmaps(model_type="simple_rnn")
+        plot_heatmaps(model_type="maxwell_nn")
     """
     from matplotlib.colors import LogNorm
 
@@ -822,8 +839,8 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
     # Global color range
     all_vals = np.concatenate([r.ravel() for r in rmse_per_model])
     if log:
-        log_floor = max(all_vals[all_vals > 0].min() * 0.1, 1e-6) if np.any(all_vals > 0) else 1e-6
-        norm = LogNorm(vmin=log_floor, vmax=all_vals.max())
+        log_floor = 1e-4
+        norm = LogNorm(vmin=1e-4, vmax=4e-1)
     else:
         norm = None
         vmin = 0
