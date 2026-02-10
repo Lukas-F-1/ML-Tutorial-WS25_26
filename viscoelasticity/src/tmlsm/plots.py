@@ -554,7 +554,7 @@ def _get_search_dirs(model_type="gsm", search_dirs=None):
 
 
 def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
-              noise_std_rel=0.0, model_type="gsm"):
+              noise_std_rel=0.0, model_type="gsm", n_test_timesteps=None):
     """Plot best seed of each config overlaid in one figure for comparison.
 
     All configs are shown in the same plot with different colors.
@@ -627,9 +627,10 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
         print(f"Unbekannter Modelltyp: {file_model_type}")
         return
 
-    # Generate test data
-    eps_h, sig_h, dts_h = _generate_test_data(n_timesteps, omegas, As, "harmonic", noise_std_rel)
-    eps_r, sig_r, dts_r = _generate_test_data(n_timesteps, omegas, As, "relaxation", noise_std_rel)
+    # Generate test data (use n_test_timesteps if provided, else n_timesteps from model file)
+    n_ts_test = n_test_timesteps if n_test_timesteps is not None else n_timesteps
+    eps_h, sig_h, dts_h = _generate_test_data(n_ts_test, omegas, As, "harmonic", noise_std_rel)
+    eps_r, sig_r, dts_r = _generate_test_data(n_ts_test, omegas, As, "relaxation", noise_std_rel)
 
     n_pts = len(eps_h[0])
     ns = np.linspace(0, 2 * np.pi, n_pts)
@@ -639,11 +640,12 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
     # Title
     tc_str = ", ".join([f"(A={a},ω={w})" for a, w in test_loadcases])
     noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
+    ts_str = f", test_ts={n_ts_test}" if n_test_timesteps is not None else ""
     model_label = MODEL_LABELS.get(file_model_type, file_model_type.upper())
 
     # --- Harmonic Plot ---
     fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"{model_label} Best Seeds Comparison — Harmonic — Test: {tc_str}{noise_str}", fontsize=11)
+    fig.suptitle(f"{model_label} Best Seeds Comparison — Harmonic — Test: {tc_str}{noise_str}{ts_str}", fontsize=11)
 
     for i in range(n_lc):
         lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
@@ -671,7 +673,7 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
 
     # --- Relaxation Plot ---
     fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"{model_label} Best Seeds Comparison — Relaxation — Test: {tc_str}{noise_str}", fontsize=11)
+    fig.suptitle(f"{model_label} Best Seeds Comparison — Relaxation — Test: {tc_str}{noise_str}{ts_str}", fontsize=11)
 
     for i in range(n_lc):
         lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
@@ -700,7 +702,7 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
 
 def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
                   test_type="harmonic", log=False, normalize=False, noise_std_rel=0.0,
-                  search_dirs=None, model_type="gsm"):
+                  search_dirs=None, model_type="gsm", n_test_timesteps=None):
     """Plot RMSE heatmaps for each config's best seed over a grid of (A, omega) test cases.
 
     Args:
@@ -724,6 +726,7 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         plot_heatmaps(test_omegas=range(1,11), test_As=range(1,11))
         plot_heatmaps(model_type="simple_rnn")
         plot_heatmaps(model_type="maxwell_nn")
+        plot_heatmaps(n_test_timesteps=200)
     """
     from matplotlib.colors import LogNorm
 
@@ -782,6 +785,9 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
     n_om = len(test_omegas)
     n_A = len(test_As)
 
+    # Use n_test_timesteps if provided, else n_timesteps from model file
+    n_ts_test = n_test_timesteps if n_test_timesteps is not None else n_timesteps
+
     # Train info for annotations
     _TRAIN_INFO = {
         "omega_1": "ω={1}",
@@ -808,8 +814,9 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
                   width_ratios=[1] * n_cols + [0.05], wspace=0.3, hspace=0.35)
     metric_name = "NRMSE" if normalize else "RMSE"
     noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
+    ts_str = f", test_ts={n_ts_test}" if n_test_timesteps is not None else ""
     model_label = MODEL_LABELS.get(file_model_type, file_model_type.upper())
-    fig.suptitle(f"{model_label} — {metric_name} Heatmaps ({test_type}) — {steps//1000}k steps{noise_str}", fontsize=13, y=0.98)
+    fig.suptitle(f"{model_label} — {metric_name} Heatmaps ({test_type}) — {steps//1000}k steps{noise_str}{ts_str}", fontsize=13, y=0.98)
 
     axes = [[fig.add_subplot(gs[r, c]) for c in range(n_cols)] for r in range(n_rows)]
     cbar_ax = fig.add_subplot(gs[:, -1])
@@ -825,7 +832,7 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         for i, A in enumerate(test_As):
             for j, omega in enumerate(test_omegas):
                 eps, sig, dts = _generate_test_data(
-                    n_timesteps, [omega], [A], test_type, noise_std_rel)
+                    n_ts_test, [omega], [A], test_type, noise_std_rel)
                 sig_pred = jax.vmap(model)((eps, dts))
                 rmse = float(np.sqrt(np.mean((np.array(sig_pred) - np.array(sig)) ** 2)))
                 if normalize:
