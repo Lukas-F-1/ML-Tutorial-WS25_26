@@ -19,6 +19,7 @@ from .configs import MATERIAL_PARAMS
 import jax
 import jax.random as jrandom
 import klax
+from matplotlib.colors import LogNorm, SymLogNorm
 
 
 # Colors for loadcases
@@ -521,6 +522,7 @@ BEST_SEEDS_GSM = {
     "amp_4":   0,
     "mixed_2": 4,
     "mixed_4": 1,
+    "mixed_4_sobolev_eps2": 2,
 }
 
 BEST_SEEDS_RNN = {
@@ -2419,6 +2421,9 @@ def plot_best_state_curvature(
     show_test_states=True,
     model_type="gsm",
     n_timesteps=None,
+    color_scale="linear",   # "linear" | "log" | "symlog"
+    log_floor=1e-8,         # minimum magnitude for log scaling
+    symlog_linthresh=1e-3
 ):
     """
     Plot energy curvature fields over state space (ε,γ) for best-seed models:
@@ -2617,6 +2622,35 @@ def plot_best_state_curvature(
         K11 = np.array(k11_flat).reshape(n_grid, n_grid)
         K12 = np.array(k12_flat).reshape(n_grid, n_grid)
 
+        # --- NEW: norms for color scaling ---
+        norm11 = None
+        norm12 = None
+
+        if color_scale == "log":
+            # Only valid for strictly positive fields -> apply to K11, and to |K12| would lose sign (not recommended)
+            k11_pos = np.abs(K11)
+            vmin11 = max(log_floor, float(np.nanpercentile(k11_pos, 1)))
+            vmax11 = float(np.nanpercentile(k11_pos, 99))
+            norm11 = LogNorm(vmin=vmin11, vmax=max(vmax11, vmin11 * 10))
+
+            # For K12: use symlog because it has negatives
+            maxabs12 = float(np.nanpercentile(np.abs(K12), 99))
+            norm12 = SymLogNorm(linthresh=symlog_linthresh, vmin=-maxabs12, vmax=maxabs12)
+
+        elif color_scale == "symlog":
+            # symlog for both (works even if positive-only)
+            maxabs11 = float(np.nanpercentile(np.abs(K11), 99))
+            maxabs12 = float(np.nanpercentile(np.abs(K12), 99))
+            norm11 = SymLogNorm(linthresh=symlog_linthresh, vmin=-maxabs11, vmax=maxabs11)
+            norm12 = SymLogNorm(linthresh=symlog_linthresh, vmin=-maxabs12, vmax=maxabs12)
+
+        elif color_scale == "linear":
+            norm11 = None
+            norm12 = None
+        else:
+            raise ValueError("color_scale must be one of: 'linear', 'log', 'symlog'")
+
+
         # Plot
         model_label = MODEL_LABELS.get(model_type, model_type.upper())
         ts_str = f", ts={n_timesteps}" if n_timesteps is not None else ""
@@ -2632,20 +2666,18 @@ def plot_best_state_curvature(
             K11,
             origin="lower",
             extent=[e0, e1, g0, g1],
-            aspect="auto"
+            aspect="auto",
+            norm=norm11,
         )
-        axs[0].set_title(r"$k_{\varepsilon\varepsilon}=\partial^2 e/\partial\varepsilon^2$  (stiffness)")
-        axs[0].set_xlabel("strain ε")
-        axs[0].set_ylabel("internal variable γ")
-        fig.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
 
-        # Heatmap 2: coupling
         im1 = axs[1].imshow(
             K12,
             origin="lower",
             extent=[e0, e1, g0, g1],
-            aspect="auto"
+            aspect="auto",
+            norm=norm12,
         )
+
         axs[1].set_title(r"$k_{\varepsilon\gamma}=\partial^2 e/(\partial\gamma\,\partial\varepsilon)=\partial\sigma/\partial\gamma$")
         axs[1].set_xlabel("strain ε")
         axs[1].set_ylabel("internal variable γ")
