@@ -723,3 +723,71 @@ def plot_energy_vs_state_loadcases(
             yscale=yscale,
             center_energy=center_energy,
         )
+
+# ---------------- GSM: teacher-forced stress (sigma) ------------------------
+
+def gsm_stress(model: Any, eps: np.ndarray, gamma: np.ndarray) -> np.ndarray:
+    """
+    Compute GSM stress sigma along a provided (eps(t), gamma(t)) trajectory:
+
+        sigma(t) = d e_theta(eps(t), gamma(t)) / d eps
+
+    This does NOT evolve gamma. It is the key building block for teacher forcing.
+
+    Parameters
+    ----------
+    model : GSMModel (trained)
+    eps : (T,)
+    gamma : (T,) or (T+1,)
+        If (T+1,), gamma[0:T] is used to align with eps[t].
+
+    Returns
+    -------
+    sig : (T,)
+    """
+    cell = model.cell
+    if not hasattr(cell, "_energy"):
+        raise ValueError("Model does not look like GSMModel (missing _energy).")
+
+    eps_j = jnp.asarray(eps)
+    gamma_j = jnp.asarray(gamma[: len(eps)])
+
+    de_deps_fn = jax.grad(cell._energy, argnums=0)
+    sig = jax.vmap(de_deps_fn)(eps_j, gamma_j)
+    return np.array(sig)
+
+
+def gsm_stress_batch(model: Any, eps_batch: np.ndarray, gamma_batch: np.ndarray) -> np.ndarray:
+    """
+    Batch version of gsm_stress.
+
+    Parameters
+    ----------
+    eps_batch : (N,T)
+    gamma_batch : (N,T) or (N,T+1)
+
+    Returns
+    -------
+    sig_batch : (N,T)
+    """
+    def _one(eps, gamma):
+        return gsm_stress(model, eps, gamma)
+
+    sig_b = jax.vmap(_one)(jnp.asarray(eps_batch), jnp.asarray(gamma_batch))
+    return np.array(sig_b)
+
+
+def gsm_teacher_forced_sigma(
+    gsm_model: Any,
+    eps_batch: np.ndarray,
+    gamma_true_batch: np.ndarray,
+) -> np.ndarray:
+    """
+    Convenience wrapper: teacher-forced GSM sigma using gamma_true(t).
+
+    This is exactly Option B:
+        sigma_TF(t) = d e_theta(eps(t), gamma_true(t)) / d eps
+
+    Returns (N,T).
+    """
+    return gsm_stress_batch(gsm_model, eps_batch, gamma_true_batch)
