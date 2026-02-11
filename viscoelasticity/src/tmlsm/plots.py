@@ -822,6 +822,19 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         "mixed_2": "(ω,A)∈{1,2}²",
     }
 
+    # Descriptive titles for presentation (cartesian product notation)
+    _PLOT_TITLES = {
+        "omega_1": "(A,ω) ∈ {1} × {1}",
+        "omega_2": "(A,ω) ∈ {1} × {1,2}",
+        "omega_3": "(A,ω) ∈ {1} × {1,2,3}",
+        "omega_4": "(A,ω) ∈ {1} × {1,2,3,4}",
+        "amp_2":   "(A,ω) ∈ {1,2} × {1}",
+        "amp_3":   "(A,ω) ∈ {1,2,3} × {1}",
+        "amp_4":   "(A,ω) ∈ {1,2,3,4} × {1}",
+        "mixed_4": "(A,ω) ∈ {1,4} × {1,4}",
+        "mixed_2": "(A,ω) ∈ {1,2} × {1,2}",
+    }
+
     # Determine grid layout
     n_models = len(model_files)
     n_cols = min(n_models, 3)
@@ -837,7 +850,7 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
     noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
     ts_str = f", test_ts={n_ts_test}" if n_test_timesteps is not None else ""
     model_label = MODEL_LABELS.get(file_model_type, file_model_type.upper())
-    fig.suptitle(f"{model_label} — {metric_name} Heatmaps ({test_type}) — {steps//1000}k steps{noise_str}{ts_str}", fontsize=13, y=0.98)
+    # suptitle removed for cleaner presentation slides
 
     axes = [[fig.add_subplot(gs[r, c]) for c in range(n_cols)] for r in range(n_rows)]
     cbar_ax = fig.add_subplot(gs[:, -1])
@@ -902,15 +915,21 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
                     ax.text(j, i, f"{val:.3f}", ha="center", va="center",
                             fontsize=7, color=color)
 
-        ax.set_xticks(range(n_om))
-        ax.set_xticklabels(test_omegas, fontsize=6)
-        ax.set_yticks(range(n_A))
-        ax.set_yticklabels(test_As, fontsize=6)
-        ax.set_xlabel("ω (test)")
-        ax.set_ylabel("A (test)")
+        # Only show ticks at integer values (skip 0.5 steps)
+        int_xticks = [i for i, v in enumerate(test_omegas) if v == int(v)]
+        int_xlabels = [int(test_omegas[i]) for i in int_xticks]
+        int_yticks = [i for i, v in enumerate(test_As) if v == int(v)]
+        int_ylabels = [int(test_As[i]) for i in int_yticks]
 
-        train_info = _TRAIN_INFO.get(config, config)
-        ax.set_title(f"{config}\nTrain: {train_info}, seed {seed}", fontsize=9)
+        ax.set_xticks(int_xticks)
+        ax.set_xticklabels(int_xlabels, fontsize=11)
+        ax.set_yticks(int_yticks)
+        ax.set_yticklabels(int_ylabels, fontsize=11)
+        ax.set_xlabel("ω (test)", fontsize=13)
+        ax.set_ylabel("A (test)", fontsize=13)
+
+        plot_title = _PLOT_TITLES.get(config, config)
+        ax.set_title(plot_title, fontsize=14, fontweight="bold")
 
     # Hide unused axes
     for idx in range(n_models, n_rows * n_cols):
@@ -919,7 +938,9 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
 
     # Colorbar in its own axis
     label = f"{metric_name} (log)" if log else metric_name
-    fig.colorbar(im, cax=cbar_ax, label=label)
+    cbar = fig.colorbar(im, cax=cbar_ax, label=label)
+    cbar.ax.tick_params(labelsize=11)
+    cbar.set_label(label, fontsize=13)
     plt.show()
 
 
@@ -1075,12 +1096,18 @@ def plot_heatmaps_timestep_study(model_type, timestep_values=None, steps=100000,
                     ax.text(j, i, f"{val:.3f}", ha="center", va="center",
                             fontsize=7, color=color)
 
-        ax.set_xticks(range(n_om))
-        ax.set_xticklabels(test_omegas, fontsize=6)
-        ax.set_yticks(range(n_A))
-        ax.set_yticklabels(test_As, fontsize=6)
-        ax.set_xlabel("ω (test)")
-        ax.set_ylabel("A (test)")
+        # Only show ticks at integer values (skip 0.5 steps)
+        int_xticks = [i for i, v in enumerate(test_omegas) if v == int(v)]
+        int_xlabels = [int(test_omegas[i]) for i in int_xticks]
+        int_yticks = [i for i, v in enumerate(test_As) if v == int(v)]
+        int_ylabels = [int(test_As[i]) for i in int_yticks]
+
+        ax.set_xticks(int_xticks)
+        ax.set_xticklabels(int_xlabels, fontsize=11)
+        ax.set_yticks(int_yticks)
+        ax.set_yticklabels(int_ylabels, fontsize=11)
+        ax.set_xlabel("ω (test)", fontsize=13)
+        ax.set_ylabel("A (test)", fontsize=13)
         ax.set_title(f"n_timesteps={n_ts}\nseed {seed}", fontsize=9)
 
     # Hide unused axes
@@ -1089,7 +1116,9 @@ def plot_heatmaps_timestep_study(model_type, timestep_values=None, steps=100000,
         axes[row][col].axis("off")
 
     label = f"{metric_name} (log)" if log else metric_name
-    fig.colorbar(im, cax=cbar_ax, label=label)
+    cbar = fig.colorbar(im, cax=cbar_ax, label=label)
+    cbar.ax.tick_params(labelsize=11)
+    cbar.set_label(label, fontsize=13)
     plt.show()
 
 
@@ -1359,6 +1388,139 @@ def _plot_ts_metrics_bar(metrics, model_types, colors, metric, metric_title):
     ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.02, 1), borderaxespad=0)
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
+    plt.show()
+
+
+def plot_timestep_study_pointwise(
+    test_points=None,
+    timestep_values=None,
+    model_types=None,
+    steps=100000,
+    search_dirs=None,
+):
+    """Plot NRMSE vs n_timesteps for specific (A, omega) test points.
+
+    Instead of aggregating over many grid points, this shows the NRMSE for
+    individual representative loadcases — e.g. one interpolation point and
+    one extrapolation point.
+
+    Each model is evaluated with the same n_timesteps it was trained on.
+
+    Args:
+        test_points: List of (A, omega) tuples to evaluate.
+                     Default: [(1.5, 1.5), (6, 6)]
+        timestep_values: List of n_timesteps. Default: [50, 100, 200, 400]
+        model_types: List of model types. Default: ["gsm", "maxwell_nn", "simple_rnn"]
+        steps: Training steps filter. Default: 100000
+        search_dirs: Directories to search. Default: ["artifacts/timestep_study"]
+
+    Examples:
+        plot_timestep_study_pointwise()
+        plot_timestep_study_pointwise(test_points=[(1.5, 1.5), (6, 6), (3, 3)])
+        plot_timestep_study_pointwise(model_types=["gsm", "maxwell_nn"])
+    """
+    if test_points is None:
+        test_points = [(1.5, 1.5), (6.0, 6.0)]
+    if timestep_values is None:
+        timestep_values = [50, 100, 200, 400]
+    if model_types is None:
+        model_types = ["gsm", "maxwell_nn", "simple_rnn"]
+    if search_dirs is None:
+        search_dirs = ["artifacts/timestep_study"]
+
+    n_points = len(test_points)
+    fig, axes = plt.subplots(1, n_points, figsize=(4.5 * n_points, 4.5),
+                             squeeze=False, sharey=True)
+    axes = axes[0]
+
+    # Track handles/labels for shared legend
+    legend_handles = {}
+
+    for pt_idx, (A, omega) in enumerate(test_points):
+        ax = axes[pt_idx]
+
+        for model_type in model_types:
+            ts_seeds = BEST_SEEDS_TIMESTEP_STUDY.get(model_type, {})
+            if not ts_seeds:
+                continue
+
+            # Build model template
+            key = jrandom.PRNGKey(0)
+            if model_type == "gsm":
+                model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
+            elif model_type == "simple_rnn":
+                model_template = tm.build(key=key)
+            elif model_type == "maxwell_nn":
+                model_template = tm.build_maxwell_nn(
+                    key=key, E_infty=MATERIAL_PARAMS["E_infty"],
+                    E_val=MATERIAL_PARAMS["E"])
+            else:
+                continue
+
+            ts_vals_found = []
+            nrmse_vals = []
+
+            for n_ts in timestep_values:
+                seed = ts_seeds.get(n_ts)
+                if seed is None:
+                    continue
+
+                pattern = f"{model_type}__mixed_4__seed_{seed}"
+                f = find_latest(pattern, steps=steps, search_dirs=search_dirs,
+                                n_timesteps=n_ts)
+                if f is None:
+                    continue
+
+                model = storage.load_model(f, model_template)
+                model = klax.finalize(model)
+
+                # Test data with same n_timesteps as training
+                eps, sig, dts = _generate_test_data(
+                    n_ts, [omega], [A], "harmonic", 0.0)
+                sig_pred = jax.vmap(model)((eps, dts))
+
+                rmse = float(np.sqrt(np.mean(
+                    (np.array(sig_pred) - np.array(sig)) ** 2)))
+                sig_std = float(np.std(np.array(sig)))
+                nrmse = rmse / sig_std if sig_std > 1e-10 else rmse
+
+                ts_vals_found.append(n_ts)
+                nrmse_vals.append(nrmse)
+
+            if ts_vals_found:
+                label = MODEL_LABELS.get(model_type, model_type)
+                color = MODEL_COLORS.get(model_type, "gray")
+                ax.plot(ts_vals_found, nrmse_vals, color=color, alpha=0.3,
+                        linewidth=1.5, zorder=2)
+                sc = ax.scatter(ts_vals_found, nrmse_vals, marker="o", s=120,
+                                color=color, zorder=3, edgecolors="white",
+                                linewidths=0.8)
+                if model_type not in legend_handles:
+                    legend_handles[model_type] = (sc, label)
+
+        ax.set_yscale("log")
+        ax.set_xlabel("n_timesteps", fontsize=12)
+        if pt_idx == 0:
+            ax.set_ylabel("NRMSE", fontsize=12)
+        ax.set_xticks(timestep_values)
+        ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
+        ax.tick_params(labelsize=11)
+        ax.grid(True, alpha=0.25, which="major")
+        ax.grid(True, alpha=0.1, which="minor")
+
+        # Subplot title: just the loadcase info
+        in_interp = (1.0 <= A <= 4.0) and (1.0 <= omega <= 4.0)
+        region = "Interpolation" if in_interp else "Extrapolation"
+        ax.set_title(f"A={A}, ω={omega}  ({region})", fontsize=13, fontweight="bold")
+
+    # Single shared legend below the figure
+    handles = [legend_handles[mt][0] for mt in model_types if mt in legend_handles]
+    labels = [legend_handles[mt][1] for mt in model_types if mt in legend_handles]
+    fig.legend(handles, labels, loc="lower center", ncol=len(labels),
+               fontsize=11, framealpha=0.9, bbox_to_anchor=(0.5, -0.02))
+
+    plt.tight_layout()
+    fig.subplots_adjust(bottom=0.18)
     plt.show()
 
 
@@ -2132,11 +2294,16 @@ def plot_best_state_curvature(
     n_grid=120,
     show_training_states=True,
     show_test_states=True,
+    model_type="gsm",
+    n_timesteps=None,
 ):
     """
-    Plot GSM energy curvature fields over state space (ε,γ) for best-seed models:
+    Plot energy curvature fields over state space (ε,γ) for best-seed models:
       - k_eps_eps(ε,γ) = ∂²e/∂ε²   (effective stiffness -> saturation if ~0)
       - k_eps_gam(ε,γ) = ∂²e/(∂γ∂ε) = ∂σ/∂γ  (coupling -> decoupling if ~0)
+
+    Supports GSM models (learned energy) and Maxwell NN models (analytical energy).
+    NOT supported for Simple RNN (no energy function).
 
     Overlays:
       - training trajectories (states visited by training loadcases for that config)
@@ -2148,6 +2315,14 @@ def plot_best_state_curvature(
       test_loadcases: list of (A, omega) tuples to overlay as OOD/ID examples
       eps_range/gamma_range: (min,max) for heatmap; if None, derived from overlay trajectories
       n_grid: resolution per axis
+      model_type: "gsm" or "maxwell_nn" (selects best seeds + model template)
+      n_timesteps: Optional filter for timestep study models (e.g. 50, 100, 200, 400)
+
+    Examples:
+      plot_best_state_curvature(["mixed_4"], model_type="gsm")
+      plot_best_state_curvature(["mixed_4"], model_type="maxwell_nn", steps=100000)
+      plot_best_state_curvature(["mixed_4"], model_type="gsm", n_timesteps=200,
+                                steps=100000, search_dirs=["artifacts/timestep_study"])
     """
 
     import numpy as np
@@ -2156,8 +2331,23 @@ def plot_best_state_curvature(
     import jax.random as jrandom
     import matplotlib.pyplot as plt
 
-    best_seeds = _get_best_seeds("gsm")
-    search_dirs = _get_search_dirs("gsm", search_dirs)
+    if model_type == "simple_rnn":
+        print("Simple RNN hat keine Energiefunktion — Curvature-Plot nicht möglich.")
+        return
+
+    # Select best seeds: from timestep study dict or from main experiment dicts
+    if n_timesteps is not None:
+        ts_seeds = BEST_SEEDS_TIMESTEP_STUDY.get(model_type, {})
+        seed_override = ts_seeds.get(n_timesteps)
+        # Build a synthetic best_seeds dict with just one entry
+        best_seeds = {}
+        if seed_override is not None:
+            for c in (configs or ["mixed_4"]):
+                best_seeds[c] = seed_override
+    else:
+        best_seeds = _get_best_seeds(model_type)
+
+    search_dirs = _get_search_dirs(model_type, search_dirs)
 
     if configs is None:
         configs = list(best_seeds.keys())
@@ -2189,8 +2379,9 @@ def plot_best_state_curvature(
         if seed is None:
             print(f"Kein best seed definiert für '{config}', überspringe.")
             continue
-        pattern = f"{config}__seed_{seed}"
-        f = find_latest(pattern, steps=steps, search_dirs=search_dirs)
+        pattern = f"{model_type}__{config}__seed_{seed}"
+        f = find_latest(pattern, steps=steps, search_dirs=search_dirs,
+                        n_timesteps=n_timesteps)
         if f is not None:
             model_files.append((config, seed, f))
 
@@ -2198,9 +2389,16 @@ def plot_best_state_curvature(
         print("Keine Modelle gefunden.")
         return
 
-    # Build GSM template for loading
+    # Build model template for loading
     key = jrandom.PRNGKey(0)
-    gsm_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
+    if model_type == "gsm":
+        model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
+    elif model_type == "maxwell_nn":
+        model_template = tm.build_maxwell_nn(
+            key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
+    else:
+        print(f"Unbekannter Modelltyp: {model_type}")
+        return
 
     # Local helper to get (eps,gamma) trajectories from your analytical generator
     def _states_for_loadcases(loadcases):
@@ -2241,7 +2439,7 @@ def plot_best_state_curvature(
 
     # --- Main: one figure per config (2 heatmaps side-by-side) ---
     for config, seed, filepath in model_files:
-        model = storage.load_model(filepath, gsm_template)
+        model = storage.load_model(filepath, model_template)
         model = klax.finalize(model)
 
         # training + test trajectories (state overlays)
@@ -2261,13 +2459,18 @@ def plot_best_state_curvature(
         gam_lin = jnp.linspace(g0, g1, n_grid)
         EE, GG = jnp.meshgrid(eps_lin, gam_lin, indexing="xy")  # (n_grid,n_grid)
 
-        # Access GSM energy function e(ε,γ)
+        # Access energy function e(ε,γ) depending on model type
         cell = model.cell
-        if not hasattr(cell, "_energy"):
-            raise ValueError("Model does not look like GSM (missing model.cell._energy).")
-
-        def e_fun(eps_s, gam_s):
-            return cell._energy(eps_s, gam_s)
+        if model_type == "gsm":
+            if not hasattr(cell, "_energy"):
+                raise ValueError("Model does not look like GSM (missing model.cell._energy).")
+            def e_fun(eps_s, gam_s):
+                return cell._energy(eps_s, gam_s)
+        elif model_type == "maxwell_nn":
+            E_inf = float(cell.E_infty)
+            E_v = float(cell.E_val)
+            def e_fun(eps_s, gam_s):
+                return 0.5 * E_inf * eps_s**2 + 0.5 * E_v * (eps_s - gam_s)**2
 
         # Curvatures:
         # k_eps_eps = ∂²e/∂ε²
@@ -2292,9 +2495,11 @@ def plot_best_state_curvature(
         K12 = np.array(k12_flat).reshape(n_grid, n_grid)
 
         # Plot
+        model_label = MODEL_LABELS.get(model_type, model_type.upper())
+        ts_str = f", ts={n_timesteps}" if n_timesteps is not None else ""
         fig, axs = plt.subplots(1, 2, figsize=(12, 5))
         fig.suptitle(
-            f"GSM curvature fields — {config} (s{seed}) — {steps//1000}k steps\n"
+            f"{model_label} curvature fields — {config} (s{seed}) — {steps//1000}k steps{ts_str}\n"
             f"Heatmaps over state space (ε,γ), with trajectory overlays",
             fontsize=11
         )
