@@ -376,3 +376,108 @@ def run_sweep(
         print(f"{'='*60}")
 
     return results
+
+def train_gsm_sobolev_eps2(
+    model,
+    train_data: tuple[np.ndarray, np.ndarray],
+    sig_target: np.ndarray,
+    train_steps: int,
+    key: jrandom.PRNGKey,
+    lr: float = 1e-3,
+    lambda_eps2: float = 1e-2,
+    log_every: int = 1000,
+):
+    """
+    Train GSM with an additional second-order Sobolev penalty in ε:
+        L = MSE(sig_pred, sig_true) + lambda * MSE(dsig/deps, (E_inf+E))
+
+    Uses the constant analytical Maxwell target for dsig/deps = E_inf + E.
+    Does NOT require ground-truth gamma.
+
+    NOTE: This is a custom training loop (not klax.fit).
+    """
+    import optax
+    import equinox as eqx
+
+    eps, dts = train_data  # (N,T)
+    sig_true = sig_target  # (N,T)
+
+    E_inf = float(MATERIAL_PARAMS["E_infty"])
+    E_val = float(MATERIAL_PARAMS["E"])
+    dsig_deps_true = E_inf + E_val
+
+    cell = model.cell  # GSMCell expected
+
+    # energy function
+    e_fun = cell._energy
+
+    # sigma = de/deps
+    de_deps = jax.grad(e_fun, argnums=0)
+
+    # dsigma/deps = d2e/deps2
+    d2e_deps2 = jax.grad(de_deps, argnums=0)
+
+    def one_traj_loss(model, eps_i, dts_i, sig_i):
+        """
+        Run model dynamics and compute:
+          - sigma_pred(t)
+          - dsigma_deps_pred(t) evaluated along the model's own gamma(t)
+        """
+        cell_i = model.cell
+
+        def step(gamma, x):
+            eps_t, dt_t = x
+
+            # sigma
+            sig_t = jax.grad(cell_i._energy, argnums=0)(eps_t, gamma)
+
+            # dsigma/deps
+            dsig_deps_t = jax.grad(jax.grad(cell_i._energy, argnums=0), argnums=0)(eps_t, gamma)
+
+            # gamma update
+            de_dgamma = jax.grad(cell_i._energy, argnums=1)(eps_t, gamma)
+            gamma_dot = -cell_i.g * de_dgamma
+            gamma_new = gamma + dt_t * gamma_dot
+
+            return gamma_new, (sig_t, dsig_deps_t)
+
+        init_gamma = jnp.array(0.0)
+        _, (sig_pred, dsig_deps_pred) = jax.lax.scan(step, init_gamma, (eps_i, dts_i))
+
+        # losses over time
+        l_sig = jnp.mean((sig_pred - sig_i) ** 2)
+        l_eps2 = jnp.mean((dsig_deps_pred - dsig_deps_true) ** 2)
+
+        return l_sig + lambda_eps2 * l_eps2, (l_sig, l_eps2)
+
+    def batch_loss(model):
+        losses, parts = jax.vmap(one_traj_loss, in_axes=(None, 0, 0, 0))(model, eps, dts, sig_true)
+        total = jnp.mean(losses)
+        l_sig = jnp.mean(parts[0])
+        l_eps2 = jnp.mean(parts[1])
+        return total, (l_sig, l_eps2)
+
+    opt = optax.adam(lr)
+    opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
+
+    @eqx.filter_jit
+    def step_fn(model, opt_state):
+        (loss_val, (l_sig, l_eps2)), grads = eqx.filter_value_and_grad(batch_loss, has_aux=True)(model)
+        updates, opt_state = opt.update(grads, opt_state, model)
+        model = eqx.apply_updates(model, updates)
+        return model, opt_state, loss_val, l_sig, l_eps2
+
+    # Training loop
+    losses = []
+    t0 = time.time()
+    for s in range(1, train_steps + 1):
+        model, opt_state, loss_val, l_sig, l_eps2 = step_fn(model, opt_state)
+        if (log_every is not None) and (s % log_every == 0 or s == 1):
+            dt_wall = time.time() - t0
+            print(f"[sobolev2] step {s}/{train_steps} | loss={float(loss_val):.6e} | "
+                  f"sig={float(l_sig):.6e} | eps2={float(l_eps2):.6e} | wall={dt_wall:.1f}s")
+        losses.append(float(loss_val))
+
+    train_time = time.time() - t0
+    final_loss = float(losses[-1]) if losses else 0.0
+    return model, train_time, final_loss
