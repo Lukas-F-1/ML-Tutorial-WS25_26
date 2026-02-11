@@ -574,27 +574,45 @@ def _get_search_dirs(model_type="gsm", search_dirs=None):
     return _SEARCH_DIRS.get(model_type, ["artifacts"])
 
 
-def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
-              noise_std_rel=0.0, model_type="gsm", n_test_timesteps=None):
-    """Plot best seed of each config overlaid in one figure for comparison.
-
-    All configs are shown in the same plot with different colors.
-    Ground truth is black dashed.
-
-    Args:
-        configs: List of config names or None for all configs
-        steps: Training steps filter (default: 250000)
-        test_loadcases: List of (A, omega) tuples. Default: [(1,1)]
-        search_dirs: Optional list of directories to search
-        noise_std_rel: Relative noise std on eps (e.g. 0.02 = 2%). Default: 0 (clean)
-        model_type: "gsm", "simple_rnn", or "maxwell_nn" (selects best seeds + search dirs)
-
-    Examples:
-        plot_best()                                          # GSM best seeds
-        plot_best(model_type="simple_rnn")                   # RNN best seeds
-        plot_best(model_type="maxwell_nn")                   # Maxwell NN best seeds
-        plot_best(["omega_2", "omega_4"], model_type="simple_rnn")
-    """
+def plot_best(
+    configs=None,
+    steps=250000,
+    test_loadcases=None,
+    search_dirs=None,
+    noise_std_rel=0.0,
+    model_type="gsm",
+    n_test_timesteps=None,
+    # ------------------------------------------------------------------
+    # NEW PARAMS (presentation customization)
+    legend_labels=None,                 # dict: {config_name: "Pretty label"}
+    legend_label_fn=None,               # fn(config, seed) -> str (overrides legend_labels if given)
+    ground_truth_label="Ground Truth",  # legend label for GT when only one loadcase
+    title=None,                         # explicit suptitle; overrides auto title
+    title_fn=None,                      # fn(context_dict) -> str (overrides title if given)
+    show_harmonic=True,                 # True -> create harmonic plot
+    show_relaxation=True,               # True -> create relaxation plot
+    # choose which subplot(s) to show
+    harmonic_panels="both",             # "left" | "right" | "both"
+    relaxation_panels="both",           # "left" | "right" | "both"
+    # axis labels
+    axis_labels_time=("time $t$", "stress $\\sigma$"),                 # (xlabel, ylabel) for time plot
+    axis_labels_epssig=("strain $\\varepsilon$", "stress $\\sigma$"),  # (xlabel, ylabel) for eps-sig plot
+    # fonts
+    title_fontsize=11,
+    legend_fontsize=7,
+    axis_label_fontsize=10,
+    title_bold=False,
+    gt_label=None,
+    # ------------------------------------------------------------------
+    # NEW: legend controls
+    show_legend=True,                   # False -> disable legend completely
+    legend_position="auto",             # "auto" | "below"
+    legend_ncol=None,                   # columns when legend_position="below" (None -> auto)
+    legend_below_y=0.02,                # vertical anchor (smaller -> lower)
+    legend_bottom_margin=0.18,          # space reserved at bottom if legend below
+):
+    """Plot best seed of each config overlaid in one figure for comparison."""
+    # ---- existing selection logic ----
     best_seeds = _get_best_seeds(model_type)
     search_dirs = _get_search_dirs(model_type, search_dirs)
 
@@ -622,18 +640,23 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
         print("Keine Modelle gefunden.")
         return
 
-    # Parse n_timesteps and file_model_type from first file
+    # Parse model filename robustly using storage helper (instead of manual splitting)
     name_only = str(model_files[0][2]).split("/")[-1].split("\\")[-1]
-    parts = name_only.replace(".eqx", "").split("__")
-    if len(parts) == 6:
-        file_model_type = parts[0]
-        n_timesteps = int(parts[4].replace("ts", ""))
-    elif len(parts) == 5:
-        file_model_type = parts[0]
-        n_timesteps = int(parts[3].replace("ts", ""))
-    else:
-        print(f"Unbekanntes Format: {name_only}")
-        return
+    try:
+        meta = storage.parse_model_filename(name_only)
+        file_model_type = meta["model_type"]
+        n_timesteps = int(meta["n_timesteps"])
+    except Exception:
+        parts = name_only.replace(".eqx", "").split("__")
+        if len(parts) == 6:
+            file_model_type = parts[0]
+            n_timesteps = int(parts[4].replace("ts", ""))
+        elif len(parts) == 5:
+            file_model_type = parts[0]
+            n_timesteps = int(parts[3].replace("ts", ""))
+        else:
+            print(f"Unbekanntes Format: {name_only}")
+            return
 
     # Build model template
     key = jrandom.PRNGKey(0)
@@ -643,82 +666,182 @@ def plot_best(configs=None, steps=250000, test_loadcases=None, search_dirs=None,
         model_template = tm.build(key=key)
     elif file_model_type == "maxwell_nn":
         model_template = tm.build_maxwell_nn(
-            key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
+            key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"]
+        )
     else:
         print(f"Unbekannter Modelltyp: {file_model_type}")
         return
 
-    # Generate test data (use n_test_timesteps if provided, else n_timesteps from model file)
-    n_ts_test = n_test_timesteps if n_test_timesteps is not None else n_timesteps
-    eps_h, sig_h, dts_h = _generate_test_data(n_ts_test, omegas, As, "harmonic", noise_std_rel)
-    eps_r, sig_r, dts_r = _generate_test_data(n_ts_test, omegas, As, "relaxation", noise_std_rel)
+    # Validate panel params early (fail fast)
+    valid_panels = {"left", "right", "both"}
+    if harmonic_panels not in valid_panels:
+        raise ValueError(f"harmonic_panels must be one of {valid_panels}, got: {harmonic_panels}")
+    if relaxation_panels not in valid_panels:
+        raise ValueError(f"relaxation_panels must be one of {valid_panels}, got: {relaxation_panels}")
 
-    n_pts = len(eps_h[0])
-    ns = np.linspace(0, 2 * np.pi, n_pts)
+    # Validate legend params
+    valid_legend_positions = {"auto", "below"}
+    if legend_position not in valid_legend_positions:
+        raise ValueError(f"legend_position must be one of {valid_legend_positions}, got: {legend_position}")
+
+    # Generate test data
+    n_ts_test = n_test_timesteps if n_test_timesteps is not None else n_timesteps
+
+    eps_h = sig_h = dts_h = None
+    eps_r = sig_r = dts_r = None
+    if show_harmonic:
+        eps_h, sig_h, dts_h = _generate_test_data(n_ts_test, omegas, As, "harmonic", noise_std_rel)
+    if show_relaxation:
+        eps_r, sig_r, dts_r = _generate_test_data(n_ts_test, omegas, As, "relaxation", noise_std_rel)
+
+    # Shared plot stuff
     n_lc = len(test_loadcases)
     cmap = plt.cm.tab10
 
-    # Title
+    # Build default auto title components
     tc_str = ", ".join([f"(A={a},ω={w})" for a, w in test_loadcases])
     noise_str = f", noise={noise_std_rel:.0%}" if noise_std_rel > 0 else ""
     ts_str = f", test_ts={n_ts_test}" if n_test_timesteps is not None else ""
     model_label = MODEL_LABELS.get(file_model_type, file_model_type.upper())
 
-    # --- Harmonic Plot ---
-    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"{model_label} Best Seeds Comparison — Harmonic — Test: {tc_str}{noise_str}{ts_str}", fontsize=11)
+    def _make_legend_label(config, seed):
+        if legend_label_fn is not None:
+            return str(legend_label_fn(config, seed))
+        if isinstance(legend_labels, dict) and config in legend_labels:
+            return str(legend_labels[config])
+        return f"{config} (s{seed})"
 
-    for i in range(n_lc):
-        lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
-        axs[0].plot(ns, sig_h[i], linestyle=":", color="black", linewidth=2, label=lbl if i == 0 else None)
-        axs[1].plot(eps_h[i], sig_h[i], linestyle=":", color="black", linewidth=2)
+    def _make_title(test_kind: str):
+        ctx = {
+            "model_label": model_label,
+            "test_kind": test_kind,
+            "test_loadcases": test_loadcases,
+            "tc_str": tc_str,
+            "noise_std_rel": noise_std_rel,
+            "noise_str": noise_str,
+            "n_ts_test": n_ts_test,
+            "ts_str": ts_str,
+            "steps": steps,
+            "model_type": file_model_type,
+        }
+        if title_fn is not None:
+            return str(title_fn(ctx))
+        if title is not None:
+            return str(title)
+        return f"{model_label} Best Seeds Comparison — {test_kind} — Test: {tc_str}{noise_str}{ts_str}"
 
-    for idx, (config, seed, filepath) in enumerate(model_files):
-        model = storage.load_model(filepath, model_template)
-        model = klax.finalize(model)
-        sig_pred = jax.vmap(model)((eps_h, dts_h))
-        c = cmap(idx % 10)
+    def _plot_one(test_kind: str, eps, sig_true, dts, panels: str):
+        n_pts = len(eps[0])
+        ns = np.linspace(0, 2 * np.pi, n_pts)
+
+        show_left = panels in ("left", "both")
+        show_right = panels in ("right", "both")
+        ncols = (1 if (show_left ^ show_right) else 2)
+
+        figsize = (6, 5) if ncols == 1 else (12, 5)
+        fig, axs = plt.subplots(1, ncols, figsize=figsize)
+
+        if ncols == 1:
+            axs = [axs]
+
+        ax_time = axs[0] if show_left else None
+        ax_epssig = (axs[-1] if show_right else None)
+
+        fig.suptitle(
+            _make_title(test_kind),
+            fontsize=title_fontsize,
+            fontweight="bold" if title_bold else "normal",
+        )
+
+        # ---- Ground truth ----
         for i in range(n_lc):
-            label = f"{config} (s{seed})" if i == 0 else None
-            axs[0].plot(ns, sig_pred[i], color=c, alpha=0.8, label=label)
-            axs[1].plot(eps_h[i], sig_pred[i], color=c, alpha=0.8)
+            if gt_label is None:
+                gt_lbl = f"True (A={As[i]},ω={omegas[i]})" if n_lc > 1 else ground_truth_label
+            else:
+                gt_lbl = gt_label
 
-    axs[0].set_xlim([0, 2 * np.pi])
-    axs[0].set_ylabel("stress $\\sigma$")
-    axs[0].set_xlabel("time $t$")
-    axs[0].legend(fontsize=7, loc="best")
-    axs[1].set_xlabel("strain $\\varepsilon$")
-    axs[1].set_ylabel("stress $\\sigma$")
-    fig.tight_layout()
-    plt.show()
+            if ax_time is not None:
+                ax_time.plot(ns, sig_true[i], linestyle=":", color="black", linewidth=2,
+                             label=gt_lbl if i == 0 else None)
+            if ax_epssig is not None:
+                ax_epssig.plot(eps[i], sig_true[i], linestyle=":", color="black", linewidth=2)
 
-    # --- Relaxation Plot ---
-    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"{model_label} Best Seeds Comparison — Relaxation — Test: {tc_str}{noise_str}{ts_str}", fontsize=11)
+        # ---- Predictions ----
+        for idx, (config, seed, filepath) in enumerate(model_files):
+            model = storage.load_model(filepath, model_template)
+            model = klax.finalize(model)
+            sig_pred = jax.vmap(model)((eps, dts))
+            c = cmap(idx % 10)
 
-    for i in range(n_lc):
-        lbl = f"GT (A={As[i]},ω={omegas[i]})" if n_lc > 1 else "Ground Truth"
-        axs[0].plot(ns, sig_r[i], linestyle=":", color="black", linewidth=2, label=lbl if i == 0 else None)
-        axs[1].plot(eps_r[i], sig_r[i], linestyle=":", color="black", linewidth=2)
+            for i in range(n_lc):
+                label = _make_legend_label(config, seed) if i == 0 else None
+                if ax_time is not None:
+                    ax_time.plot(ns, sig_pred[i], color=c, alpha=0.8, label=label)
+                if ax_epssig is not None:
+                    ax_epssig.plot(eps[i], sig_pred[i], color=c, alpha=0.8)
 
-    for idx, (config, seed, filepath) in enumerate(model_files):
-        model = storage.load_model(filepath, model_template)
-        model = klax.finalize(model)
-        sig_pred = jax.vmap(model)((eps_r, dts_r))
-        c = cmap(idx % 10)
-        for i in range(n_lc):
-            label = f"{config} (s{seed})" if i == 0 else None
-            axs[0].plot(ns, sig_pred[i], color=c, alpha=0.8, label=label)
-            axs[1].plot(eps_r[i], sig_pred[i], color=c, alpha=0.8)
+        # ---- Labels / styling ----
+        if ax_time is not None:
+            ax_time.set_xlim([0, 2 * np.pi])
+            ax_time.set_xlabel(axis_labels_time[0], fontsize=axis_label_fontsize)
+            ax_time.set_ylabel(axis_labels_time[1], fontsize=axis_label_fontsize)
 
-    axs[0].set_xlim([0, 2 * np.pi])
-    axs[0].set_ylabel("stress $\\sigma$")
-    axs[0].set_xlabel("time $t$")
-    axs[0].legend(fontsize=7, loc="best")
-    axs[1].set_xlabel("strain $\\varepsilon$")
-    axs[1].set_ylabel("stress $\\sigma$")
-    fig.tight_layout()
-    plt.show()
+        if ax_epssig is not None:
+            ax_epssig.set_xlabel(axis_labels_epssig[0], fontsize=axis_label_fontsize)
+            ax_epssig.set_ylabel(axis_labels_epssig[1], fontsize=axis_label_fontsize)
+
+        # ---- Legend handling (NEW) ----
+        if show_legend:
+            if legend_position == "auto":
+                # Keep your old behavior: legend on first available axis
+                legend_ax = ax_time if ax_time is not None else ax_epssig
+                if legend_ax is not None:
+                    legend_ax.legend(fontsize=legend_fontsize, loc="best")
+
+                fig.tight_layout()
+            else:
+                # Place a shared legend below the axes (figure-level legend)
+                # Collect handles/labels from whichever axis exists
+                src_ax = ax_time if ax_time is not None else ax_epssig
+                handles, labels = ([], [])
+                if src_ax is not None:
+                    handles, labels = src_ax.get_legend_handles_labels()
+
+                # If there is nothing labeled, just layout normally
+                if len(handles) == 0:
+                    fig.tight_layout()
+                else:
+                    # Choose columns automatically if not provided
+                    if legend_ncol is None:
+                        legend_ncol_eff = min(len(labels), 4)  # sensible default
+                    else:
+                        legend_ncol_eff = int(legend_ncol)
+
+                    fig.legend(
+                        handles, labels,
+                        loc="lower center",
+                        bbox_to_anchor=(0.5, legend_below_y),
+                        ncol=legend_ncol_eff,
+                        fontsize=legend_fontsize,
+                        frameon=False,
+                    )
+                    # Reserve bottom space for the legend, then tighten remaining
+                    fig.subplots_adjust(bottom=legend_bottom_margin)
+                    fig.tight_layout(rect=(0, legend_bottom_margin, 1, 1))
+        else:
+            # No legend at all
+            fig.tight_layout()
+
+        plt.show()
+
+    # Render requested plots
+    if show_harmonic:
+        _plot_one("Harmonic", eps_h, sig_h, dts_h, panels=harmonic_panels)
+    if show_relaxation:
+        _plot_one("Relaxation", eps_r, sig_r, dts_r, panels=relaxation_panels)
+
+
+
 
 
 def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
@@ -2342,3 +2465,255 @@ def plot_best_state_curvature(
 
         fig.tight_layout()
         plt.show()
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from .configs import MATERIAL_PARAMS
+from . import data as td
+from . import models as tm
+from . import evaluation as ev
+
+
+# -------------------------
+# Coverage metrics
+# -------------------------
+
+def _convex_hull_monotone_chain(points: np.ndarray) -> np.ndarray:
+    """Return convex hull vertices in CCW order using monotone chain. points: (N,2)."""
+    pts = np.unique(points, axis=0)
+    if pts.shape[0] <= 2:
+        return pts
+
+    pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]  # sort by x, then y
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(tuple(p))
+
+    upper = []
+    for p in pts[::-1]:
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(tuple(p))
+
+    hull = np.array(lower[:-1] + upper[:-1], dtype=float)
+    return hull
+
+
+def _polygon_area(poly: np.ndarray) -> float:
+    """Shoelace formula for polygon area. poly: (M,2) CCW."""
+    if poly.shape[0] < 3:
+        return 0.0
+    x = poly[:, 0]
+    y = poly[:, 1]
+    return 0.5 * float(np.abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
+def state_space_coverage_area(
+    eps_batch: np.ndarray,
+    gamma_batch: np.ndarray,
+    method: str = "grid",
+    bins: int = 200,
+    eps_range=None,
+    gamma_range=None,
+) -> float:
+    """
+    Approximate covered 'area' in (ε,γ) state space for a set of trajectories.
+
+    method:
+      - "grid": occupancy-based union area estimate (recommended)
+      - "hull": convex hull area (upper bound, can overestimate)
+
+    eps_batch, gamma_batch: (N,T)
+    """
+    pts = np.stack([eps_batch.reshape(-1), gamma_batch.reshape(-1)], axis=1)
+
+    if method == "hull":
+        hull = _convex_hull_monotone_chain(pts)
+        return _polygon_area(hull)
+
+    if method != "grid":
+        raise ValueError("method must be 'grid' or 'hull'")
+
+    if eps_range is None:
+        eps_min, eps_max = float(np.min(pts[:, 0])), float(np.max(pts[:, 0]))
+    else:
+        eps_min, eps_max = eps_range
+
+    if gamma_range is None:
+        g_min, g_max = float(np.min(pts[:, 1])), float(np.max(pts[:, 1]))
+    else:
+        g_min, g_max = gamma_range
+
+    # avoid degenerate ranges
+    eps_span = (eps_max - eps_min) if eps_max > eps_min else 1.0
+    g_span = (g_max - g_min) if g_max > g_min else 1.0
+
+    # bin indices
+    ix = np.floor((pts[:, 0] - eps_min) / eps_span * bins).astype(int)
+    iy = np.floor((pts[:, 1] - g_min) / g_span * bins).astype(int)
+    ix = np.clip(ix, 0, bins - 1)
+    iy = np.clip(iy, 0, bins - 1)
+
+    occ = np.zeros((bins, bins), dtype=bool)
+    occ[iy, ix] = True
+
+    cell_area = (eps_span / bins) * (g_span / bins)
+    return float(np.sum(occ) * cell_area)
+
+
+# -------------------------
+# Coverage visualization
+# -------------------------
+
+def plot_state_space_coverage_families(
+    k: int = 6,
+    n_timesteps: int = 400,
+    families=("omega", "A", "both"),
+    A0: float = 1.0,
+    w0: float = 1.0,
+    coverage_method: str = "grid",
+    coverage_bins: int = 220,
+):
+    """
+    Plot (ε,γ) state trajectories for 3 loadpath families and report coverage area.
+    Uses analytical Maxwell model to compute γ from ε and dt.
+    """
+
+    def make_loadcases(fam: str):
+        fam = fam.lower()
+        if fam == "omega":
+            return [(A0, float(w)) for w in range(1, k + 1)]
+        if fam == "a":
+            return [(float(A), w0) for A in range(1, k + 1)]
+        if fam == "both":
+            return [(float(i), float(i)) for i in range(1, k + 1)]
+        raise ValueError("families must contain 'omega', 'A', or 'both'")
+
+    E_inf = MATERIAL_PARAMS["E_infty"]
+    E = MATERIAL_PARAMS["E"]
+    eta = MATERIAL_PARAMS["eta"]
+
+    maxwell = tm.build_maxwell(E_infty=E_inf, E_val=E, eta=eta)
+
+    fig, axs = plt.subplots(1, len(families), figsize=(5.6 * len(families), 4.8))
+    if len(families) == 1:
+        axs = [axs]
+
+    for ax, fam in zip(axs, families):
+        lcs = make_loadcases(fam)
+        As = [lc[0] for lc in lcs]
+        ws = [lc[1] for lc in lcs]
+
+        eps, _, sig, dts = td.generate_data_harmonic(E_inf, E, eta, n_timesteps, ws, As)
+
+        gamma_max, _ = ev.simulate_model_batch(maxwell, eps, dts)
+        # simulate_model_batch often returns gamma with length T+1 (includes gamma0)
+        if gamma_max.shape[1] == eps.shape[1] + 1:
+            gamma_max = gamma_max[:, : eps.shape[1]]
+
+
+        # plot all trajectories
+        cmap = plt.cm.tab10
+        for i, (A, w) in enumerate(lcs):
+            c = cmap(i % 10)
+            ax.plot(eps[i], gamma_max[i], color=c, alpha=0.85, linewidth=1.2, label=f"A={A},ω={w}")
+
+        area_grid = state_space_coverage_area(eps, gamma_max, method=coverage_method, bins=coverage_bins)
+
+        ax.set_title(f"Family: {fam}  |  coverage≈{area_grid:.2f} ({coverage_method})")
+        ax.set_xlabel("strain ε")
+        ax.set_ylabel("internal variable γ (Maxwell)")
+        ax.grid(alpha=0.25)
+
+        # legend can get huge; keep small or remove
+        if len(lcs) <= 6:
+            ax.legend(fontsize=7, loc="best")
+
+    fig.suptitle(f"State-space coverage by training family (k={k}, T={n_timesteps})", fontsize=12)
+    fig.tight_layout()
+    plt.show()
+
+def plot_state_space_coverage_custom(
+    A_list,
+    omega_list,
+    n_timesteps: int = 400,
+    combine: str = "product",  # "product" or "zip"
+    coverage_method: str = "grid",
+    coverage_bins: int = 220,
+    title: str | None = None,
+):
+    """
+    Plot (ε,γ) trajectories for a custom set of loadcases and report coverage.
+
+    combine:
+      - "product": use Cartesian product A×ω  (all pairs)
+      - "zip": pair-wise (A_i, ω_i), requires same length
+    """
+
+    A_list = [float(a) for a in A_list]
+    omega_list = [float(w) for w in omega_list]
+
+    if combine not in ("product", "zip"):
+        raise ValueError("combine must be 'product' or 'zip'")
+
+    if combine == "zip":
+        if len(A_list) != len(omega_list):
+            raise ValueError("For combine='zip', A_list and omega_list must have same length.")
+        loadcases = list(zip(A_list, omega_list))
+    else:
+        loadcases = [(A, w) for A in A_list for w in omega_list]
+
+    E_inf = MATERIAL_PARAMS["E_infty"]
+    E = MATERIAL_PARAMS["E"]
+    eta = MATERIAL_PARAMS["eta"]
+
+    # generate eps(t), dts(t) from harmonic generator
+    As = [lc[0] for lc in loadcases]
+    ws = [lc[1] for lc in loadcases]
+    eps, _, _, dts = td.generate_data_harmonic(E_inf, E, eta, n_timesteps, ws, As)
+
+    # simulate Maxwell to get gamma(t)
+    maxwell = tm.build_maxwell(E_infty=E_inf, E_val=E, eta=eta)
+    gamma_max, _ = ev.simulate_model_batch(maxwell, eps, dts)
+
+    # align gamma length (T+1 -> T)
+    if gamma_max.shape[1] == eps.shape[1] + 1:
+        gamma_max = gamma_max[:, : eps.shape[1]]
+
+    area = state_space_coverage_area(
+        eps, gamma_max, method=coverage_method, bins=coverage_bins
+    )
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
+    cmap = plt.cm.tab20
+
+    for i, (A, w) in enumerate(loadcases):
+        c = cmap(i % 20)
+        ax.plot(eps[i], gamma_max[i], color=c, alpha=0.85, linewidth=1.2, label=f"A={A},ω={w}")
+
+    ax.set_xlabel("strain ε")
+    ax.set_ylabel("internal variable γ (Maxwell)")
+    ax.grid(alpha=0.25)
+
+    if title is None:
+        title = f"Custom coverage | N={len(loadcases)} | area≈{area:.2f} ({coverage_method}, bins={coverage_bins})"
+    ax.set_title(title)
+
+    # legend management
+    if len(loadcases) <= 10:
+        ax.legend(fontsize=8, loc="best")
+    else:
+        ax.legend([], [], frameon=False)
+
+    fig.tight_layout()
+    plt.show()
+
+    return area
