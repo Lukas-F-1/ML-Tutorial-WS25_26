@@ -63,8 +63,8 @@ TIMESTEP_VALUES = [50, 100, 200, 400]
 MODEL_TYPES = ["gsm", "maxwell_nn", "simple_rnn"]
 
 # Training settings
-N_SEEDS = 5
-TOTAL_STEPS = 250_000
+N_SEEDS = 3
+TOTAL_STEPS = 100_000
 LOG_EVERY = 500
 
 # Material parameters

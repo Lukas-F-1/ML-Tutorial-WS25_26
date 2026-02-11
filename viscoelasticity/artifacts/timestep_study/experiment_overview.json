@@ -24,13 +24,13 @@
     "maxwell_nn",
     "simple_rnn"
   ],
-  "n_seeds": 5,
-  "total_steps": 250000,
+  "n_seeds": 3,
+  "total_steps": 100000,
   "material_params": {
     "E_infty": 0.5,
     "E": 2.0,
     "eta": 1.0
   },
   "note": "All timestep values trained fresh in this folder",
-  "start_time": "2026-02-10T20:27:57.397317"
+  "start_time": "2026-02-11T00:04:40.150597"
 }
