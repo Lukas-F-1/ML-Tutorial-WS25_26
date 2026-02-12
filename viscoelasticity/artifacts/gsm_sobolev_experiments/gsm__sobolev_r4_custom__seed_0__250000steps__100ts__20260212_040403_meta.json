@@ -1,0 +1,25 @@
+{
+  "config_name": "sobolev_r4_custom",
+  "seed": 0,
+  "train_steps": 250000,
+  "n_timesteps": 100,
+  "As": [
+    1.0,
+    2.0,
+    4.0,
+    6.0
+  ],
+  "omegas": [
+    0.5,
+    1.0,
+    2.0,
+    5.0
+  ],
+  "lr": 0.001,
+  "lambda_eps2": 0.01,
+  "log_every": 2000,
+  "final_loss": 3.627769910963252e-05,
+  "train_time_returned_s": 2263.3261280059814,
+  "wall_time_s": 2263.3277254104614,
+  "timestamp": "20260212_040403"
+}

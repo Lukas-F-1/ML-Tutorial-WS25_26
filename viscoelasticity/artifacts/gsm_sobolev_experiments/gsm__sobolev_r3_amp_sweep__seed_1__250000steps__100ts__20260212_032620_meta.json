@@ -1,0 +1,25 @@
+{
+  "config_name": "sobolev_r3_amp_sweep",
+  "seed": 1,
+  "train_steps": 250000,
+  "n_timesteps": 100,
+  "As": [
+    1.0,
+    2.0,
+    3.0,
+    4.0
+  ],
+  "omegas": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "lr": 0.001,
+  "lambda_eps2": 0.01,
+  "log_every": 2000,
+  "final_loss": 2.9819767475128174,
+  "train_time_returned_s": 2518.9587495326996,
+  "wall_time_s": 2518.9604003429413,
+  "timestamp": "20260212_032620"
+}

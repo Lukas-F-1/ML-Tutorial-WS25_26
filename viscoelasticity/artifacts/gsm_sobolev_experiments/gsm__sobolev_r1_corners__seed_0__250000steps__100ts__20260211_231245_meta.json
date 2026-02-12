@@ -1,0 +1,25 @@
+{
+  "config_name": "sobolev_r1_corners",
+  "seed": 0,
+  "train_steps": 250000,
+  "n_timesteps": 100,
+  "As": [
+    1.0,
+    4.0,
+    4.0,
+    1.0
+  ],
+  "omegas": [
+    1.0,
+    1.0,
+    4.0,
+    4.0
+  ],
+  "lr": 0.001,
+  "lambda_eps2": 0.01,
+  "log_every": 2000,
+  "final_loss": 7.49073194583616e-07,
+  "train_time_returned_s": 2233.7289962768555,
+  "wall_time_s": 2233.7673649787903,
+  "timestamp": "20260211_231245"
+}
