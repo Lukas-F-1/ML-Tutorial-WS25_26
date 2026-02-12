@@ -16,6 +16,7 @@ from . import models as tm
 from . import storage
 from . import evaluation as ev
 from .configs import MATERIAL_PARAMS
+import equinox as eqx
 import jax
 import jax.random as jrandom
 import klax
@@ -50,6 +51,50 @@ MODEL_LABELS = {
 
 # Keep old name for backwards compatibility
 colors = LOADCASE_COLORS
+
+
+def plot_stress_hysteresis(
+    eps, sig, omegas, As,
+    figsize=(12, 5),
+    fontsize_title=18,
+    fontsize_label=16,
+    fontsize_tick=14,
+    fontsize_legend=14,
+):
+    """Plot stress over time and hysteresis (ε vs σ) — presentation-ready.
+
+    Args:
+        eps: (N, T) strain array
+        sig: (N, T) stress array
+        omegas: list of frequencies
+        As: list of amplitudes
+    """
+    n = len(eps[0])
+    ns = np.linspace(0, 2 * np.pi, n)
+
+    fig, (ax_time, ax_hyst) = plt.subplots(1, 2, figsize=figsize)
+
+    for i in range(len(eps)):
+        label = f"$\\omega={omegas[i]:.0f},\\; A={As[i]:.0f}$"
+        ax_time.plot(ns, sig[i], label=label, color=colors[i], linewidth=2)
+        ax_hyst.plot(eps[i], sig[i], color=colors[i], linewidth=2, label=label)
+
+    # Left: σ(t)
+    ax_time.set_xlim([0, 2 * np.pi])
+    ax_time.set_xlabel("time $t$", fontsize=fontsize_label)
+    ax_time.set_ylabel(r"stress $\sigma$", fontsize=fontsize_label)
+    ax_time.tick_params(labelsize=fontsize_tick)
+    ax_time.grid(True, alpha=0.3)
+    ax_time.legend(fontsize=fontsize_legend)
+
+    # Right: Hysteresis
+    ax_hyst.set_xlabel(r"strain $\varepsilon$", fontsize=fontsize_label)
+    ax_hyst.set_ylabel(r"stress $\sigma$", fontsize=fontsize_label)
+    ax_hyst.tick_params(labelsize=fontsize_tick)
+    ax_hyst.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    plt.show()
 
 
 def plot_data(eps, eps_dot, sig, omegas, As):
@@ -549,6 +594,13 @@ BEST_SEEDS_MAXWELL_NN = {
     "mixed_4": 3,
 }
 
+BEST_SEEDS_GSM_SOBOLEV = {
+    "sobolev_r1_corners":    1,
+    "sobolev_r2_omega_sweep": 1,
+    "sobolev_r3_amp_sweep":  1,
+    "sobolev_r4_custom":     0,
+}
+
 # Best seeds for timestep study (model_type -> n_timesteps -> seed)
 BEST_SEEDS_TIMESTEP_STUDY = {
     "gsm": {50: 1, 100: 2, 200: 0, 400: 1},
@@ -558,9 +610,10 @@ BEST_SEEDS_TIMESTEP_STUDY = {
 
 # Default search dirs per model type
 _SEARCH_DIRS = {
-    "gsm":        ["artifacts", "artifacts/gsm_experiments"],
-    "simple_rnn": ["artifacts", "artifacts/rnn_experiments"],
-    "maxwell_nn": ["artifacts", "artifacts/maxwell_nn_experiments"],
+    "gsm":           ["artifacts", "artifacts/gsm_experiments"],
+    "simple_rnn":    ["artifacts", "artifacts/rnn_experiments"],
+    "maxwell_nn":    ["artifacts", "artifacts/maxwell_nn_experiments"],
+    "gsm_sobolev":   ["artifacts/gsm_sobolev_experiments"],
 }
 
 def _get_best_seeds(model_type="gsm"):
@@ -568,6 +621,8 @@ def _get_best_seeds(model_type="gsm"):
         return BEST_SEEDS_RNN
     elif model_type == "maxwell_nn":
         return BEST_SEEDS_MAXWELL_NN
+    elif model_type == "gsm_sobolev":
+        return BEST_SEEDS_GSM_SOBOLEV
     return BEST_SEEDS_GSM
 
 def _get_search_dirs(model_type="gsm", search_dirs=None):
@@ -958,6 +1013,10 @@ def plot_heatmaps(configs=None, steps=250000, test_omegas=None, test_As=None,
         "amp_4":   "(A,ω) ∈ {1,2,3,4} × {1}",
         "mixed_4": "(A,ω) ∈ {1,4} × {1,4}",
         "mixed_2": "(A,ω) ∈ {1,2} × {1,2}",
+        "sobolev_r1_corners":     "(A,ω) ∈ {1,4} × {1,4}",
+        "sobolev_r2_omega_sweep": "(A,ω) ∈ {1} × {1,2,3,4}",
+        "sobolev_r3_amp_sweep":   "(A,ω) ∈ {1,2,3,4} × {1}",
+        "sobolev_r4_custom":      "(A,ω) ∈ {1,2,4,6} × {0.5,1,2,5}",
     }
 
     # Determine grid layout
@@ -2954,3 +3013,570 @@ def plot_state_space_coverage_custom(
     plt.show()
 
     return area
+
+
+# =============================================================================
+# Noise Robustness Comparison
+# =============================================================================
+
+def plot_noise_robustness(
+    configs: list[str] | None = None,
+    test_loadcase: tuple[float, float] = (6.0, 6.0),
+    noise_std_rel: float = 0.05,
+    model_types: list[str] | None = None,
+    steps: int | dict[str, int] = None,
+    search_dirs: list[str] | None = None,
+    n_test_timesteps: int = 200,
+    n_timesteps: int | None = None,
+    test_type: str = "harmonic",
+    figsize: tuple = (14, 5),
+    fontsize_title: int = 18,
+    fontsize_label: int = 16,
+    fontsize_tick: int = 14,
+    fontsize_legend: int = 14,
+):
+    """Compare noise robustness across model types.
+
+    For each model: run prediction on clean and noisy eps, compute the difference
+    delta_sig = sig_pred_clean - sig_pred_noisy, and report metrics on delta_sig.
+
+    Args:
+        configs: Training configs to use (default: ["mixed_4"]).
+        test_loadcase: (A, omega) test case.
+        noise_std_rel: Relative noise std on epsilon (e.g. 0.05 = 5%).
+        model_types: List of model types (default: ["simple_rnn", "maxwell_nn", "gsm"]).
+        steps: Training steps filter. Either a single int for all models,
+               or a dict mapping model_type -> steps.
+               Default: maxwell_nn=100000, others=250000.
+        search_dirs: Override search directories (applied to all model types).
+        n_test_timesteps: Number of test timesteps.
+        n_timesteps: Optional filter for timestep study models.
+        test_type: "harmonic" or "relaxation".
+
+    Example:
+        plot_noise_robustness(
+            configs=["mixed_4"],
+            test_loadcase=(6.0, 6.0),
+            noise_std_rel=0.05,
+            model_types=["simple_rnn", "maxwell_nn", "gsm"],
+        )
+        # Custom steps per model:
+        plot_noise_robustness(steps={"maxwell_nn": 100000, "gsm": 250000, "simple_rnn": 250000})
+    """
+    if configs is None:
+        configs = ["mixed_4"]
+    if model_types is None:
+        model_types = ["simple_rnn", "maxwell_nn", "gsm"]
+
+    # Default steps: maxwell_nn trained with 100k, others with 250k
+    _DEFAULT_STEPS = {"maxwell_nn": 100000}
+    _DEFAULT_FALLBACK = 250000
+    if steps is None:
+        steps_dict = _DEFAULT_STEPS
+    elif isinstance(steps, int):
+        steps_dict = {mt: steps for mt in model_types}
+    else:
+        steps_dict = steps  # already a dict
+
+    def _steps_for(mt):
+        return steps_dict.get(mt, _DEFAULT_FALLBACK)
+
+    A, omega = test_loadcase
+
+    # --- Generate test data (clean and noisy) ---
+    eps_clean, sig_true, dts = _generate_test_data(
+        n_test_timesteps, [omega], [A], test_type, noise_std_rel=0.0)
+    eps_noisy, _, _ = _generate_test_data(
+        n_test_timesteps, [omega], [A], test_type, noise_std_rel=noise_std_rel)
+
+    eps_clean = jnp.array(eps_clean)
+    eps_noisy = jnp.array(eps_noisy)
+    dts_jnp = jnp.array(dts)
+
+    key = jrandom.PRNGKey(0)
+    n_ts = len(eps_clean[0])
+    ns = np.linspace(0, 2 * np.pi, n_ts)
+
+    # --- Collect results per model ---
+    results = {}  # model_label -> {delta_sig, metrics}
+
+    for mt in model_types:
+        best_seeds = _get_best_seeds(mt)
+        sd = _get_search_dirs(mt, search_dirs)
+
+        # Build model template
+        if mt == "gsm" or mt == "gsm_sobolev":
+            model_template = tm.build_gsm(key=key, g=1.0 / MATERIAL_PARAMS["eta"])
+        elif mt == "simple_rnn":
+            model_template = tm.build(key=key)
+        elif mt == "maxwell_nn":
+            model_template = tm.build_maxwell_nn(
+                key=key, E_infty=MATERIAL_PARAMS["E_infty"], E_val=MATERIAL_PARAMS["E"])
+        else:
+            print(f"Unknown model_type: {mt}, skipping.")
+            continue
+
+        label = MODEL_LABELS.get(mt, mt.upper())
+        color = MODEL_COLORS.get(mt, "#333333")
+
+        for config in configs:
+            seed = best_seeds.get(config)
+            if seed is None:
+                print(f"No best seed for {mt}/{config}, skipping.")
+                continue
+
+            pattern = f"{mt}__{config}__seed_{seed}" if mt != "gsm_sobolev" else f"gsm__{config}__seed_{seed}"
+            filepath = find_latest(pattern, steps=_steps_for(mt), search_dirs=sd,
+                                   n_timesteps=n_timesteps)
+            if filepath is None:
+                continue
+
+            model = storage.load_model(filepath, model_template)
+            model = klax.finalize(model)
+
+            # Run clean and noisy predictions
+            sig_pred_clean = np.array(jax.vmap(model)((eps_clean, dts_jnp)))
+            sig_pred_noisy = np.array(jax.vmap(model)((eps_noisy, dts_jnp)))
+
+            # Difference (squeeze from (1,T) to (T,))
+            delta_sig = (sig_pred_clean - sig_pred_noisy).squeeze()
+            sig_clean_sq = sig_pred_clean.squeeze()
+
+            # Compute metrics
+            rmse = float(np.sqrt(np.mean(delta_sig ** 2)))
+            sig_std = float(np.std(sig_clean_sq))
+            nrmse = rmse / sig_std if sig_std > 1e-10 else 0.0
+            mean_abs = float(np.mean(np.abs(delta_sig)))
+            median_abs = float(np.median(np.abs(delta_sig)))
+            min_abs = float(np.min(np.abs(delta_sig)))
+            max_abs = float(np.max(np.abs(delta_sig)))
+
+            results[label] = {
+                "delta_sig": delta_sig,
+                "color": color,
+                "metrics": {
+                    "RMSE": rmse,
+                    "NRMSE": nrmse,
+                    "Mean": mean_abs,
+                    "Median": median_abs,
+                    "Min": min_abs,
+                    "Max": max_abs,
+                },
+            }
+
+            print(f"{label:15s}  RMSE={rmse:.6f}  NRMSE={nrmse:.6f}  "
+                  f"Mean={mean_abs:.6f}  Max={max_abs:.6f}")
+
+    if not results:
+        print("No models found.")
+        return
+
+    # --- Plot ---
+    fig, (ax_time, ax_bar) = plt.subplots(1, 2, figsize=figsize)
+
+    # Left panel: delta_sig(t) per model
+    for label, res in results.items():
+        ax_time.plot(ns, res["delta_sig"], color=res["color"], linewidth=2, label=label)
+    ax_time.axhline(0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax_time.set_xlabel("time $t$", fontsize=fontsize_label)
+    ax_time.set_ylabel(r"$\Delta\sigma = \sigma_{\mathrm{clean}} - \sigma_{\mathrm{noisy}}$",
+                       fontsize=fontsize_label)
+    ax_time.set_xlim([0, 2 * np.pi])
+    ax_time.tick_params(labelsize=fontsize_tick)
+    ax_time.grid(True, alpha=0.3)
+    ax_time.legend(fontsize=fontsize_legend)
+
+    # Right panel: grouped bar chart of metrics
+    metric_names = ["RMSE", "NRMSE", "Mean", "Median", "Max"]
+    model_labels = list(results.keys())
+    n_metrics = len(metric_names)
+    n_models = len(model_labels)
+    x = np.arange(n_metrics)
+    bar_width = 0.8 / n_models
+
+    for i, label in enumerate(model_labels):
+        vals = [results[label]["metrics"][m] for m in metric_names]
+        ax_bar.bar(x + i * bar_width, vals, bar_width,
+                   color=results[label]["color"], label=label, alpha=0.85)
+
+    ax_bar.set_xticks(x + bar_width * (n_models - 1) / 2)
+    ax_bar.set_xticklabels(metric_names, fontsize=fontsize_tick)
+    ax_bar.tick_params(axis="y", labelsize=fontsize_tick)
+    ax_bar.set_ylabel("Value", fontsize=fontsize_label)
+    ax_bar.grid(True, alpha=0.3, axis="y")
+    ax_bar.legend(fontsize=fontsize_legend)
+
+    fig.suptitle(
+        f"Noise Robustness at $(A, \\omega) = ({A:.0f}, {omega:.0f})$, "
+        f"noise$={noise_std_rel * 100:.0f}\\%$",
+        fontsize=fontsize_title, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    plt.show()
+
+    return results
+
+
+# =============================================================================
+# Amplitude Ceiling Plot
+# =============================================================================
+
+def plot_amplitude_ceiling(
+    filepath: str,
+    omega: float = 6.0,
+    A_values: np.ndarray | list | None = None,
+    n_timesteps: int = 100,
+    deriv_agg: str = "mean",
+    mode: str = "line",
+    model_type: str = "gsm",
+    train_A_max: float | None = 4.0,
+    figsize: tuple = (12, 5),
+    fontsize_title: int = 18,
+    fontsize_label: int = 16,
+    fontsize_tick: int = 14,
+    fontsize_legend: int = 14,
+):
+    """Plot sigma_max and energy derivatives vs test amplitude.
+
+    Args:
+        filepath: Path to a saved .eqx model file.
+        omega: Fixed test frequency (default: 6.0).
+        A_values: Test amplitudes. Default: np.arange(0.5, 15.5, 0.5).
+        n_timesteps: Time discretization for each test (default: 100).
+        deriv_agg: Aggregation for derivatives: "mean", "median", "max", "min".
+                   Only used when mode="line".
+        mode: "line" — aggregated line plot (one value per amplitude).
+              "scatter" — scatter all trajectory points, x=amplitude, y=derivative value.
+              "density" — KDE density plot.
+        model_type: "gsm" or "maxwell_nn".
+        train_A_max: Vertical line at max training amplitude (default: 4.0).
+        figsize: Figure size.
+
+    Examples:
+        plot_amplitude_ceiling(f)
+        plot_amplitude_ceiling(f, model_type="maxwell_nn")
+        plot_amplitude_ceiling(f, mode="density")
+    """
+    if A_values is None:
+        A_values = np.arange(0.5, 15.5, 0.5)
+
+    mp = MATERIAL_PARAMS
+    E_inf = mp["E_infty"]
+    E_val = mp["E"]
+    eta = mp["eta"]
+
+    # --- Aggregation function ---
+    _AGG_FNS = {
+        "mean": jnp.mean, "median": jnp.median,
+        "max": jnp.max, "min": jnp.min,
+    }
+    if deriv_agg not in _AGG_FNS:
+        raise ValueError(f"deriv_agg must be one of {list(_AGG_FNS)}, got '{deriv_agg}'")
+    agg_fn = _AGG_FNS[deriv_agg]
+
+    # --- Load model ---
+    key = jrandom.PRNGKey(0)
+    if model_type == "gsm":
+        model_template = tm.build_gsm(key=key, g=1.0 / eta)
+    elif model_type == "maxwell_nn":
+        model_template = tm.build_maxwell_nn(key=key, E_infty=E_inf, E_val=E_val)
+    else:
+        raise ValueError(f"model_type must be 'gsm' or 'maxwell_nn', got '{model_type}'")
+    model = storage.load_model(filepath, model_template)
+    model = klax.finalize(model)
+
+    # --- Build energy function depending on model type ---
+    cell_i = model.cell
+    if model_type == "gsm":
+        def e_fun(eps_s, gam_s):
+            return cell_i._energy(eps_s, gam_s)
+    else:  # maxwell_nn — analytical energy
+        _E_inf = float(cell_i.E_infty)
+        _E_v = float(cell_i.E_val)
+        def e_fun(eps_s, gam_s):
+            return 0.5 * _E_inf * eps_s**2 + 0.5 * _E_v * (eps_s - gam_s)**2
+
+    de_deps = jax.grad(e_fun, argnums=0)
+    k_ee_fun = jax.grad(de_deps, argnums=0)
+    k_eg_fun = jax.grad(de_deps, argnums=1)
+    de_dgamma_fun = jax.grad(e_fun, argnums=1)
+
+    # --- Run model trajectory ---
+    def _run_model_trajectory(model, eps_1d, dts_1d):
+        cell_run = model.cell
+        if model_type == "gsm":
+            def step(gamma, x):
+                eps_t, dt_t = x
+                sig_t = de_deps(eps_t, gamma)
+                d2e_ee_t = k_ee_fun(eps_t, gamma)
+                d2e_eg_t = k_eg_fun(eps_t, gamma)
+                de_dgamma = de_dgamma_fun(eps_t, gamma)
+                gamma_new = gamma + dt_t * (-cell_run.g * de_dgamma)
+                return gamma_new, (sig_t, d2e_ee_t, d2e_eg_t)
+        else:  # maxwell_nn — learned evolution f(eps,gamma)*(eps-gamma)
+            def step(gamma, x):
+                eps_t, dt_t = x
+                sig_t = de_deps(eps_t, gamma)
+                d2e_ee_t = k_ee_fun(eps_t, gamma)
+                d2e_eg_t = k_eg_fun(eps_t, gamma)
+                f_val = cell_run.f_theta(eps_t, gamma)
+                gamma_dot = f_val * (eps_t - gamma)
+                gamma_new = gamma + dt_t * gamma_dot
+                return gamma_new, (sig_t, d2e_ee_t, d2e_eg_t)
+        init_gamma = jnp.array(0.0)
+        _, (sig, d2e_ee, d2e_eg) = jax.lax.scan(step, init_gamma, (eps_1d, dts_1d))
+        return sig, d2e_ee, d2e_eg
+
+    @eqx.filter_jit
+    def _run_jit(model, eps_1d, dts_1d):
+        return _run_model_trajectory(model, eps_1d, dts_1d)
+
+    # --- Collect data ---
+    model_sig_max = []
+    model_d2ee_agg = []
+    model_d2eg_agg = []
+    gt_sig_max = []
+
+    # For scatter mode: raw trajectory points
+    scatter_A_model = []
+    scatter_d2ee_model = []
+    scatter_d2eg_model = []
+
+    # --- Detect if learned energy has γ with flipped sign ---
+    # Only relevant for GSM (learned energy). Maxwell NN has analytical energy → no flip.
+    _d2e_eg_check = float(k_eg_fun(jnp.array(0.5), jnp.array(0.0)))
+    _gamma_sign_flip = -1.0 if _d2e_eg_check > 0 else 1.0
+
+    _model_label = "GSM" if model_type == "gsm" else "Maxwell+NN"
+    print(f"Computing amplitude ceiling ({_model_label}) for {len(A_values)} amplitudes at ω={omega}..."
+          f" (γ sign flip: {_gamma_sign_flip == -1.0})")
+    for A in A_values:
+        eps, sig_true, dts = _generate_test_data(n_timesteps, [omega], [A], "harmonic")
+        eps_1d = jnp.array(eps[0])
+        dts_1d = jnp.array(dts[0])
+
+        sig_m, d2e_ee_m, d2e_eg_m = _run_jit(model, eps_1d, dts_1d)
+        d2e_eg_m = d2e_eg_m * _gamma_sign_flip  # correct for learned γ sign
+        model_sig_max.append(float(jnp.max(sig_m)))
+        gt_sig_max.append(float(np.max(sig_true[0])))
+
+        if mode in ("scatter", "density"):
+            n_pts = len(d2e_ee_m)
+            scatter_A_model.extend([A] * n_pts)
+            scatter_d2ee_model.extend(np.array(d2e_ee_m).tolist())
+            scatter_d2eg_model.extend(np.array(d2e_eg_m).tolist())
+        else:
+            model_d2ee_agg.append(float(agg_fn(d2e_ee_m)))
+            model_d2eg_agg.append(float(agg_fn(d2e_eg_m)))
+
+    model_sig_max = np.array(model_sig_max)
+    gt_sig_max = np.array(gt_sig_max)
+
+    # --- Shared σ axis range ---
+    all_sig = np.concatenate([model_sig_max, gt_sig_max])
+    sig_ylim = (0, np.max(all_sig) * 1.08)
+
+    # =====================================================================
+    if mode in ("scatter", "density"):
+        scatter_A_model = np.array(scatter_A_model)
+        scatter_d2ee_model = np.array(scatter_d2ee_model)
+        scatter_d2eg_model = np.array(scatter_d2eg_model)
+
+        # Shared y-axis range for both derivative panels
+        all_deriv_vals = np.concatenate([scatter_d2ee_model, scatter_d2eg_model,
+                                         [E_inf + E_val, -E_val]])
+        deriv_ylim = (min(float(np.min(all_deriv_vals)), -E_val) - 0.3,
+                      max(float(np.max(all_deriv_vals)), E_inf + E_val) + 0.3)
+
+        fig, axes = plt.subplots(1, 3, figsize=(figsize[0] * 1.3, figsize[1]))
+
+        # Panel 1: σ_max (line, both model + GT)
+        ax_sig = axes[0]
+        h_gsm, = ax_sig.plot(A_values, model_sig_max, "-o", markersize=4, color="#f6a315")
+        h_gt, = ax_sig.plot(A_values, gt_sig_max, "--", linewidth=2.5, color="#d32f2f", alpha=0.9)
+        ax_sig.set_title(r"max $\sigma = \partial e / \partial\varepsilon$", fontsize=fontsize_title, fontweight="bold")
+        ax_sig.set_xlabel("Test Amplitude $A$", fontsize=fontsize_label)
+        ax_sig.set_ylabel(r"max $\sigma$", fontsize=fontsize_label)
+        ax_sig.tick_params(labelsize=fontsize_tick)
+        ax_sig.set_ylim(sig_ylim)
+        ax_sig.grid(True, alpha=0.3)
+
+        # Vertical line: max training amplitude
+        h_vline = None
+        if train_A_max is not None:
+            for ax in axes:
+                ln = ax.axvline(train_A_max, color="#333333", linestyle=":", linewidth=2.5, alpha=0.85)
+            h_vline = ln
+
+        if mode == "density":
+            from scipy.stats import gaussian_kde
+
+            def _plot_kde(ax, x_data, y_data, gt_val, cmap, title, ylabel, ylim=None):
+                """Helper: KDE-based smooth density plot. Falls back to scatter if data is degenerate."""
+                x_min, x_max = x_data.min(), x_data.max()
+                if ylim is not None:
+                    y_min, y_max = ylim
+                else:
+                    y_min, y_max = y_data.min(), y_data.max()
+                    y_pad = (y_max - y_min) * 0.1
+                    y_min -= y_pad
+                    y_max += y_pad
+
+                try:
+                    n_grid = 200
+                    xi = np.linspace(x_min, x_max, n_grid)
+                    yi = np.linspace(y_min, y_max, n_grid)
+                    Xi, Yi = np.meshgrid(xi, yi)
+                    positions = np.vstack([Xi.ravel(), Yi.ravel()])
+
+                    kde = gaussian_kde(np.vstack([x_data, y_data]), bw_method=0.08)
+                    Z = kde(positions).reshape(Xi.shape)
+
+                    ax.imshow(Z, origin="lower", aspect="auto", cmap=cmap,
+                              extent=[x_min, x_max, y_min, y_max],
+                              interpolation="bilinear")
+                except np.linalg.LinAlgError:
+                    # Data is (near-)constant in y → KDE fails. Fall back to scatter.
+                    color = {"Blues": "#436384", "Greens": "#16a48a"}.get(cmap, "#436384")
+                    ax.scatter(x_data, y_data, s=2, alpha=0.3, color=color)
+                    ax.grid(True, alpha=0.3)
+
+                ax.axhline(gt_val, color="#d32f2f", linestyle="--", linewidth=2.5, alpha=0.9)
+                ax.set_title(title, fontsize=fontsize_title, fontweight="bold")
+                ax.set_xlabel("Test Amplitude $A$", fontsize=fontsize_label)
+                ax.set_ylabel(ylabel, fontsize=fontsize_label)
+                ax.tick_params(labelsize=fontsize_tick)
+                if ylim is not None:
+                    ax.set_ylim(ylim)
+
+            _plot_kde(axes[1], scatter_A_model, scatter_d2ee_model,
+                      E_inf + E_val, "Blues",
+                      r"$\partial\sigma / \partial\varepsilon$",
+                      r"$\partial\sigma / \partial\varepsilon$",
+                      ylim=deriv_ylim)
+
+            _plot_kde(axes[2], scatter_A_model, scatter_d2eg_model,
+                      -E_val, "Greens",
+                      r"$\partial\sigma / \partial\gamma$",
+                      r"$\partial\sigma / \partial\gamma$",
+                      ylim=deriv_ylim)
+
+        else:  # scatter
+            # Panel 2: scatter ∂σ/∂ε
+            ax_ee = axes[1]
+            ax_ee.scatter(scatter_A_model, scatter_d2ee_model, s=2, alpha=0.3, color="#436384")
+            ax_ee.axhline(E_inf + E_val, color="#d32f2f", linestyle="--", linewidth=2.5, alpha=0.9)
+            ax_ee.set_title(r"$\partial\sigma / \partial\varepsilon$", fontsize=fontsize_title, fontweight="bold")
+            ax_ee.set_xlabel("Test Amplitude $A$", fontsize=fontsize_label)
+            ax_ee.set_ylabel(r"$\partial\sigma / \partial\varepsilon$", fontsize=fontsize_label)
+            ax_ee.tick_params(labelsize=fontsize_tick)
+            ax_ee.set_ylim(deriv_ylim)
+            ax_ee.grid(True, alpha=0.3)
+
+            # Panel 3: scatter ∂σ/∂γ
+            ax_eg = axes[2]
+            ax_eg.scatter(scatter_A_model, scatter_d2eg_model, s=2, alpha=0.3, color="#16a48a")
+            ax_eg.axhline(-E_val, color="#d32f2f", linestyle="--", linewidth=2.5, alpha=0.9)
+            ax_eg.set_title(r"$\partial\sigma / \partial\gamma$", fontsize=fontsize_title, fontweight="bold")
+            ax_eg.set_xlabel("Test Amplitude $A$", fontsize=fontsize_label)
+            ax_eg.set_ylabel(r"$\partial\sigma / \partial\gamma$", fontsize=fontsize_label)
+            ax_eg.tick_params(labelsize=fontsize_tick)
+            ax_eg.set_ylim(deriv_ylim)
+            ax_eg.grid(True, alpha=0.3)
+
+        # Shared legend below all panels
+        legend_handles = [h_gsm]
+        legend_labels = [_model_label]
+        if h_vline is not None:
+            legend_handles.append(h_vline)
+            legend_labels.append(f"Train $A_{{\\mathrm{{max}}}}$")
+        legend_handles.append(h_gt)
+        legend_labels.append("Ground Truth")
+        fig.legend(legend_handles, legend_labels, loc="lower center",
+                   ncol=len(legend_handles), fontsize=fontsize_legend + 1,
+                   frameon=False, bbox_to_anchor=(0.5, -0.06))
+
+        fig.suptitle(f"Amplitude Response at $\\omega = {omega}$",
+                     fontsize=fontsize_title + 1, fontweight="bold", y=1.02)
+        fig.tight_layout(rect=(0, 0.05, 1, 1))
+        plt.show()
+
+    # =====================================================================
+    else:  # mode == "line"
+        model_d2ee_agg = np.array(model_d2ee_agg)
+        model_d2eg_agg = np.array(model_d2eg_agg)
+        gt_d2ee = np.full_like(A_values, E_inf + E_val, dtype=float)
+        gt_d2eg = np.full_like(A_values, -E_val, dtype=float)
+
+        all_deriv = np.concatenate([model_d2ee_agg, model_d2eg_agg, gt_d2ee, gt_d2eg])
+        deriv_min = np.min(all_deriv)
+        deriv_max = np.max(all_deriv)
+        deriv_pad = (deriv_max - deriv_min) * 0.15
+        deriv_ylim = (deriv_min - deriv_pad, deriv_max + deriv_pad)
+
+        agg_label = deriv_agg
+
+        fig, (ax_model, ax_gt) = plt.subplots(1, 2, figsize=figsize)
+
+        # Vertical line: max training amplitude
+        if train_A_max is not None:
+            for ax in (ax_model, ax_gt):
+                ax.axvline(train_A_max, color="#333333", linestyle=":", linewidth=2.5,
+                           alpha=0.85, label=f"train $A_{{max}}={train_A_max:.0f}$")
+
+        # === Left: Model ===
+        ax_model.plot(A_values, model_sig_max, "-o", markersize=4, label=r"GSM max $\sigma$", color="#f6a315")
+        ax_model.set_title("Trained GSM Model", fontsize=fontsize_title, fontweight="bold")
+        ax_model.set_xlabel("Test Amplitude $A$", fontsize=fontsize_label)
+        ax_model.set_ylabel(r"max $\sigma$", fontsize=fontsize_label, color="#f6a315")
+        ax_model.tick_params(axis="y", labelsize=fontsize_tick, colors="#f6a315")
+        ax_model.tick_params(axis="x", labelsize=fontsize_tick)
+        ax_model.set_ylim(sig_ylim)
+        ax_model.grid(True, alpha=0.3)
+
+        ax_model_r = ax_model.twinx()
+        ax_model_r.plot(A_values, model_d2ee_agg, "-s", markersize=4,
+                        label=rf"{agg_label} $\partial^2 e / \partial\varepsilon^2$", color="#436384")
+        ax_model_r.plot(A_values, model_d2eg_agg, "-^", markersize=4,
+                        label=rf"{agg_label} $\partial^2 e / \partial\varepsilon\,\partial\gamma$", color="#16a48a")
+        ax_model_r.set_ylabel("Derivatives", fontsize=fontsize_label, color="#436384")
+        ax_model_r.tick_params(axis="y", labelsize=fontsize_tick, colors="#436384")
+        ax_model_r.set_ylim(deriv_ylim)
+
+        # Legend outside below
+        lines_l, labels_l = ax_model.get_legend_handles_labels()
+        lines_r, labels_r = ax_model_r.get_legend_handles_labels()
+        ax_model.legend(lines_l + lines_r, labels_l + labels_r,
+                        fontsize=fontsize_legend, loc="lower center",
+                        bbox_to_anchor=(0.5, -0.25), ncol=3, frameon=False)
+
+        # === Right: Ground Truth ===
+        ax_gt.plot(A_values, gt_sig_max, "-o", markersize=4, label=r"max $\sigma$", color="#c24c4c")
+        ax_gt.set_title("Ground Truth (Maxwell)", fontsize=fontsize_title, fontweight="bold")
+        ax_gt.set_xlabel("Test Amplitude $A$", fontsize=fontsize_label)
+        ax_gt.set_ylabel(r"max $\sigma$", fontsize=fontsize_label, color="#c24c4c")
+        ax_gt.tick_params(axis="y", labelsize=fontsize_tick, colors="#c24c4c")
+        ax_gt.tick_params(axis="x", labelsize=fontsize_tick)
+        ax_gt.set_ylim(sig_ylim)
+        ax_gt.grid(True, alpha=0.3)
+
+        ax_gt_r = ax_gt.twinx()
+        ax_gt_r.plot(A_values, gt_d2ee, "-s", markersize=4,
+                     label=rf"$\partial^2 e / \partial\varepsilon^2 = E_\infty + E$", color="#436384")
+        ax_gt_r.plot(A_values, gt_d2eg, "-^", markersize=4,
+                     label=rf"$\partial^2 e / \partial\varepsilon\,\partial\gamma = -E$", color="#16a48a")
+        ax_gt_r.set_ylabel("Derivatives", fontsize=fontsize_label, color="#436384")
+        ax_gt_r.tick_params(axis="y", labelsize=fontsize_tick, colors="#436384")
+        ax_gt_r.set_ylim(deriv_ylim)
+
+        # Legend outside below
+        lines_l, labels_l = ax_gt.get_legend_handles_labels()
+        lines_r, labels_r = ax_gt_r.get_legend_handles_labels()
+        ax_gt.legend(lines_l + lines_r, labels_l + labels_r,
+                     fontsize=fontsize_legend, loc="lower center",
+                     bbox_to_anchor=(0.5, -0.25), ncol=3, frameon=False)
+
+        fig.suptitle(f"Amplitude Response at $\\omega = {omega}$",
+                     fontsize=fontsize_title + 1, fontweight="bold", y=1.02)
+        fig.subplots_adjust(bottom=0.22)
+        fig.tight_layout(rect=(0, 0.08, 1, 1))
+        plt.show()
